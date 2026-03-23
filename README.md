@@ -472,6 +472,48 @@ mdxfind is designed to handle massive hash collections. Judy array compression p
 
 The compact hash table adds a small per-hash overhead for fast prefix matching, but the dominant memory cost is the Judy array. This makes it practical to load hash databases that would exhaust memory with conventional approaches.
 
+## Benchmarks
+
+mdxfind's speed comes from its file-oriented architecture: hashes are loaded into Judy arrays once, then every candidate word is tested against all loaded hashes in a single pass. This is fundamentally different from tools like hashcat, which iterate over the hash list for each candidate on the GPU. For large hash collections, mdxfind's approach is dramatically faster.
+
+### Standard benchmark: 29 million MD5 hashes
+
+The standard benchmark loads 29,012,259 MD5 hashes from `29m.txt` (913 MB) and processes a 29-million-line wordlist (`29m.pass`, 304 MB). Two tests are run:
+
+- **Solve** (worst case): All 29M hashes are found, so mdxfind must load hashes, compute MD5 for every word, match, and write 29M result lines to stdout.
+- **No-solve**: The hash file contains reversed hashes (`29mr.txt`) so no matches occur. This isolates the raw load + hash computation time without output overhead.
+
+All mdxfind runs use `-m e1` (MD5 only) and r1.209.
+
+#### Results
+
+| System | CPU | Cores | Solve | No-solve |
+|--------|-----|------:|------:|---------:|
+| Apple Mac Mini | Apple M1 | 8 | 7.7s | 3.7s |
+| Desktop | AMD Ryzen 7 1800X | 16 | 12.7s | 4.9s |
+| iMac | Intel i9-9900K | 16 | 14.2s | 3.0s |
+| Server | 2x Xeon E5-2697 v4 | 72 | 20.2s | 5.3s |
+| Server | POWER8 | 80 | 61.0s | 5.0s |
+
+Key observations:
+
+- The M1 solves 29M hashes in **7.7 seconds** despite having only 8 cores, thanks to ARM CE SHA acceleration and efficient memory bandwidth.
+- **No-solve times are 3-5 seconds** across all platforms: ~2 seconds to load 29M hashes into Judy arrays, plus ~1-3 seconds to compute 29M MD5 hashes. The solve overhead (writing 29M output lines) dominates on multi-socket systems due to stdout contention.
+- The Xeon E5-2697v4 (72 cores) is slower than the 16-core Ryzen on the solve test because stdout serialization becomes the bottleneck with many threads.
+
+#### Hash loading time
+
+Loading 29M MD5 hashes into the Judy array takes approximately 2 seconds across all platforms:
+
+| System | Hash load time |
+|--------|---------------:|
+| M1 | 1.5s |
+| i9-9900K | 2.0s |
+| Xeon E5-2697v4 | 2.9s |
+| POWER8 | 2.9s |
+
+This scales roughly linearly — loading 100M hashes takes ~7 seconds, 500M hashes takes ~35 seconds.
+
 ## Building
 
 ```bash

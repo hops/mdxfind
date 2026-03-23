@@ -89,6 +89,21 @@
 
 #include "mdxfind.h"
 
+/* arc4random_buf fallback for glibc < 2.36 */
+#if defined(__linux__) && !defined(__GLIBC_PREREQ)
+#define NEED_ARC4RANDOM_COMPAT 1
+#elif defined(__linux__) && defined(__GLIBC_PREREQ)
+#if !__GLIBC_PREREQ(2, 36)
+#define NEED_ARC4RANDOM_COMPAT 1
+#endif
+#endif
+#ifdef NEED_ARC4RANDOM_COMPAT
+#include <fcntl.h>
+static void arc4random_buf(void *buf, size_t nbytes) {
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd >= 0) { read(fd, buf, nbytes); close(fd); }
+}
+#endif
 
 #define OUTBUFSIZE (MAXLINE+MAXLINE)
 
@@ -117,9 +132,12 @@ int Neon;
 #define mysha1 SHA1
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.208 2026/03/23 02:51:54 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.209 2026/03/23 04:44:23 dlr Exp dlr $";
 /*
  * $Log: mdxfind.c,v $
+ * Revision 1.209  2026/03/23 04:44:23  dlr
+ * Add arc4random_buf compat shim for glibc < 2.36
+ *
  * Revision 1.208  2026/03/23 02:51:54  dlr
  * Replace -n digit hack with mask-based hybrid attack: -n "?l?d" append, -N prepend, ?[0-9a-f] custom classes
  *
