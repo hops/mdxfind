@@ -263,17 +263,15 @@ mdxfind uses a producer-consumer architecture with [yarn.c](https://github.com/m
 - **Worker threads** (one per CPU by default) process each word against all loaded hashes across all selected types
 - Job buffers are recycled through a pipeline to minimize allocation overhead
 
-### Hash Storage
+### Hash Storage: Hybrid Compact Table
 
-Hash lookup uses [Judy arrays](https://judy.sourceforge.net/) (HP's compressed associative data structure), providing O(1) lookup with dramatically lower memory usage than conventional hash tables:
+For hex hashes loaded via `-f` or `-F`, mdxfind uses a hybrid compact hash table with Judy array overflow. This replaced the earlier pure-Judy approach and provides both speed and memory efficiency:
 
-- ~100 million MD5 hashes fit in ~1.5 GB (vs. ~7.2 GB in a flat hash table)
-- Hash values are split into prefix (Judy key) and suffix (compact table) for efficient storage
-- Per-type salt arrays (`Typesalt[]`) store salt values associated with each hash
+- **Compact table**: An open-addressing hash table using 32-bit fingerprints and indices. The first 8 bytes of each hash are used as the key; a 32-bit fingerprint is extracted and probed with linear probing (up to 16 slots). On a fingerprint match, the full hash bytes are compared from a packed data buffer.
+- **Judy overflow**: When the 16-probe limit is exhausted during insertion, the entry spills into a JudyL array keyed by the 8-byte prefix, with sorted hash chains for fast lookup.
+- **Per-type salt arrays**: `Typesalt[]` Judy arrays store salt values associated with each hash, enabling per-hash salts via `-F`.
 
-### Compact Hash Table
-
-For hex hashes loaded via `-f` or `-F`, mdxfind uses a compact table that stores only the hash bytes needed for comparison, indexed by a prefix extracted from the hash value. This reduces memory usage while maintaining O(1) amortized lookup with overflow chaining.
+The compact table auto-resizes (doubling) to maintain low load factor, reclaiming overflow entries that fit after resize. In practice, overflow is rare — the table handles 29M+ hashes with zero overflow at default sizing.
 
 ### SIMD Acceleration
 
@@ -462,19 +460,19 @@ mdsplit -p solved_ -f results.txt *.txt
 
 ## Memory Efficiency
 
-mdxfind is designed to handle massive hash collections. Judy array compression provides dramatically better memory efficiency than flat hash tables:
+mdxfind is designed to handle massive hash collections. The hybrid compact table stores hash data in a packed byte buffer with compact fingerprint indices, and only overflows into Judy arrays for the rare collisions that exceed the 16-probe limit. This is far more memory-efficient than conventional hash tables:
 
-| Hashes | mdxfind (Judy) | Flat table | Savings |
-|--------|---------------|------------|---------|
+| Hashes | mdxfind | Flat table | Savings |
+|--------|---------|------------|---------|
 | 1M | ~15 MB | ~72 MB | 4.8x |
 | 10M | ~150 MB | ~720 MB | 4.8x |
 | 100M | ~1.5 GB | ~7.2 GB | 4.8x |
 
-The compact hash table adds a small per-hash overhead for fast prefix matching, but the dominant memory cost is the Judy array. This makes it practical to load hash databases that would exhaust memory with conventional approaches.
+This makes it practical to load hash databases that would exhaust memory with conventional approaches.
 
 ## Benchmarks
 
-mdxfind's speed comes from its file-oriented architecture: hashes are loaded into Judy arrays once, then every candidate word is tested against all loaded hashes in a single pass. This is fundamentally different from tools like hashcat, which iterate over the hash list for each candidate on the GPU. For large hash collections, mdxfind's approach is dramatically faster.
+mdxfind's speed comes from its file-oriented architecture: hashes are loaded into the compact table once, then every candidate word is tested against all loaded hashes in a single pass. This is fundamentally different from tools like hashcat, which iterate over the hash list for each candidate on the GPU. For large hash collections, mdxfind's approach is dramatically faster.
 
 ### Standard benchmark: 29 million MD5 hashes
 
@@ -503,7 +501,7 @@ Key observations:
 
 #### Hash loading time
 
-Loading 29M MD5 hashes into the Judy array takes approximately 2 seconds across all platforms:
+Loading 29M MD5 hashes into the compact table takes approximately 2 seconds across all platforms:
 
 | System | Hash load time |
 |--------|---------------:|
