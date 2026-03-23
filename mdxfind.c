@@ -72,7 +72,6 @@
 #include <sph_panama.h>
 #include <sph_radiogatun.h>
 #include <sph_ripemd.h>
-#include <sph_sha0.h>
 #include <sph_sha1.h>
 #include <sph_sha2.h>
 #include <sph_sha3.h>
@@ -132,9 +131,15 @@ int Neon;
 #define mysha1 SHA1
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.209 2026/03/23 04:44:23 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.210 2026/03/23 06:53:38 dlr Exp dlr $";
 /*
  * $Log: mdxfind.c,v $
+ * Revision 1.210  2026/03/23 06:53:38  dlr
+ * Replace OpenSSL SHA-0 with built-in implementation; remove phantom sph_sha0.h include
+ *
+ * SHA-0 was removed from OpenSSL. Inline implementation is identical to SHA-1
+ * but without the left-rotate in the message expansion step.
+ *
  * Revision 1.209  2026/03/23 04:44:23  dlr
  * Add arc4random_buf compat shim for glibc < 2.36
  *
@@ -948,7 +953,38 @@ extern char *bsd_crypt_des(char *cur, char *salt, char *buff, void *work);
 
 extern void WHIRLPOOL(char *cur, int len, unsigned char *dest);
 
-extern void SHA(char *cur, int len, unsigned char *dest);
+/* SHA-0: identical to SHA-1 but without the rotate in message expansion.
+ * Removed from OpenSSL; minimal implementation here. */
+static void SHA(char *cur, int len, unsigned char *dest) {
+    uint32_t h0=0x67452301, h1=0xEFCDAB89, h2=0x98BADCFE, h3=0x10325476, h4=0xC3D2E1F0;
+    uint32_t w[80], a, b, c, d, e, f, k, tmp;
+    unsigned char buf[128];
+    uint64_t bits = (uint64_t)len * 8;
+    int i, blocks, pos;
+    memcpy(buf, cur, len < 120 ? len : 120);
+    buf[len] = 0x80;
+    memset(buf + len + 1, 0, sizeof(buf) - len - 1);
+    blocks = (len + 9 <= 64) ? 1 : 2;
+    pos = blocks * 64 - 8;
+    for (i = 0; i < 8; i++) buf[pos + i] = (bits >> (56 - 8*i)) & 0xFF;
+    for (int blk = 0; blk < blocks; blk++) {
+        unsigned char *p = buf + blk * 64;
+        for (i = 0; i < 16; i++) w[i] = ((uint32_t)p[4*i]<<24)|((uint32_t)p[4*i+1]<<16)|((uint32_t)p[4*i+2]<<8)|p[4*i+3];
+        for (i = 16; i < 80; i++) w[i] = w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16]; /* no rotate = SHA-0 */
+        a=h0; b=h1; c=h2; d=h3; e=h4;
+        for (i = 0; i < 80; i++) {
+            if (i<20)      { f=(b&c)|((~b)&d); k=0x5A827999; }
+            else if (i<40) { f=b^c^d;           k=0x6ED9EBA1; }
+            else if (i<60) { f=(b&c)|(b&d)|(c&d); k=0x8F1BBCDC; }
+            else           { f=b^c^d;           k=0xCA62C1D6; }
+            tmp = ((a<<5)|(a>>27)) + f + e + k + w[i];
+            e=d; d=c; c=(b<<30)|(b>>2); b=a; a=tmp;
+        }
+        h0+=a; h1+=b; h2+=c; h3+=d; h4+=e;
+    }
+    for (i=0;i<4;i++) { dest[i]=(h0>>(24-8*i))&0xFF; dest[4+i]=(h1>>(24-8*i))&0xFF;
+        dest[8+i]=(h2>>(24-8*i))&0xFF; dest[12+i]=(h3>>(24-8*i))&0xFF; dest[16+i]=(h4>>(24-8*i))&0xFF; }
+}
 
 extern void mysha1(void *cur, int len, unsigned char *dest);
 
