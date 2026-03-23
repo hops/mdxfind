@@ -496,8 +496,26 @@ All mdxfind runs use `-m e1` (MD5 only) and r1.209.
 Key observations:
 
 - The M1 solves 29M hashes in **7.7 seconds** despite having only 8 cores, thanks to ARM CE SHA acceleration and efficient memory bandwidth.
-- **No-solve times are 3-5 seconds** across all platforms: ~2 seconds to load 29M hashes into Judy arrays, plus ~1-3 seconds to compute 29M MD5 hashes. The solve overhead (writing 29M output lines) dominates on multi-socket systems due to stdout contention.
+- **No-solve times are 3-5 seconds** across all platforms: ~2 seconds to load 29M hashes into the compact table, plus ~1-3 seconds to compute 29M MD5 hashes. The solve overhead (writing 29M output lines) dominates on multi-socket systems due to stdout contention.
 - The Xeon E5-2697v4 (72 cores) is slower than the 16-core Ryzen on the solve test because stdout serialization becomes the bottleneck with many threads.
+
+#### Comparison with hashcat (CPU mode)
+
+On the same Ryzen 7 1800X (16 cores, no GPU), hashcat v6.2.3 running the identical 29M MD5 task:
+
+| Tool | Solve (29M found) | No-solve (0 found) |
+|------|-------------------:|-------------------:|
+| mdxfind | 12.7s | 4.9s |
+| hashcat | 21m 25s | 57.8s |
+| **Ratio** | **~101x** | **~12x** |
+
+hashcat command: `hashcat -a 0 -m 0 -o /dev/null --potfile-disable 29m.txt 29m.pass`
+
+The difference is architectural. hashcat is optimized for GPU throughput: it loads hashes into a lookup structure, then streams candidates through GPU kernels. In CPU-only mode without a GPU, hashcat falls back to OpenCL on the CPU, which is not its intended deployment. mdxfind is designed from the ground up for CPU-based hash searching — its compact table provides O(1) hash lookup, and its threaded pipeline saturates all cores with minimal synchronization overhead.
+
+Even in the no-solve case (pure load + compute, no output), mdxfind is 12x faster. When all 29M hashes are found, the gap widens to 101x because mdxfind's output path (direct `sprintf` into per-thread buffers) is far more efficient than hashcat's at this scale.
+
+Note: hashcat's primary strength is GPU acceleration. With a modern GPU, hashcat's MD5 hash *rate* far exceeds any CPU. But for large hash collections (millions to hundreds of millions of hashes), the bottleneck shifts from hash computation to hash *lookup* — and mdxfind's compact table architecture handles this efficiently regardless of hash count.
 
 #### Hash loading time
 
