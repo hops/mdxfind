@@ -4,6 +4,10 @@ Multi-threaded, multi-algorithm hash search engine. Searches wordlists against l
 
 Uses [yarn.c](https://github.com/madler/pigz) for threading, [libJudy](https://judy.sourceforge.net/) for compressed hash lookup, and [hashpipe](https://github.com/Cynosureprime/hashpipe) for hash verification.
 
+## History
+
+<!-- Add history text here -->
+
 ## Overview
 
 mdxfind is designed for processing very large hash collections (100+ million hashes) against wordlists, with optional rules, salts, usernames, peppers, and hybrid mask attacks. It can:
