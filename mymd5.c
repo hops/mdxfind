@@ -1,5 +1,8 @@
 /* 
  * $Log: mymd5.c,v $
+ * Revision 1.23  2026/03/23 13:42:11  dlr
+ * Add SHA-0 implementation (moved from mdxfind.c). Block-oriented, handles arbitrary length input with single 64-byte working buffer.
+ *
  * Revision 1.22  2026/02/28 16:22:20  dlr
  * hash_exists() fast-path probe, adaptive high-water-mark SSE buffer zero, mymd5salt_pre/post partial-state MD5, Livesalts dynamically allocated with JOB_DONE
  *
@@ -2295,6 +2298,56 @@ void pbkdf2_sha512(char *cur, int len, unsigned char *salt, int saltlen, int rou
   }
 }
 
+/* SHA-0: identical to SHA-1 but without the rotate in message expansion.
+ * Removed from OpenSSL; standalone implementation here. */
+static inline void sha0_block(uint32_t *h, const unsigned char *p) {
+    uint32_t w[80], a, b, c, d, e, f, k, tmp;
+    int i;
+    for (i = 0; i < 16; i++)
+        w[i] = ((uint32_t)p[4*i]<<24)|((uint32_t)p[4*i+1]<<16)|((uint32_t)p[4*i+2]<<8)|p[4*i+3];
+    for (i = 16; i < 80; i++)
+        w[i] = w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16]; /* no rotate = SHA-0 */
+    a=h[0]; b=h[1]; c=h[2]; d=h[3]; e=h[4];
+    for (i = 0; i < 80; i++) {
+        if (i<20)      { f=(b&c)|((~b)&d); k=0x5A827999; }
+        else if (i<40) { f=b^c^d;           k=0x6ED9EBA1; }
+        else if (i<60) { f=(b&c)|(b&d)|(c&d); k=0x8F1BBCDC; }
+        else           { f=b^c^d;           k=0xCA62C1D6; }
+        tmp = ((a<<5)|(a>>27)) + f + e + k + w[i];
+        e=d; d=c; c=(b<<30)|(b>>2); b=a; a=tmp;
+    }
+    h[0]+=a; h[1]+=b; h[2]+=c; h[3]+=d; h[4]+=e;
+}
 
-     
+void SHA(char *cur, int len, unsigned char *dest) {
+    uint32_t h[5] = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0};
+    unsigned char block[64];
+    const unsigned char *p = (const unsigned char *)cur;
+    uint64_t bits = (uint64_t)len * 8;
+    int remaining = len, i;
+
+    while (remaining >= 64) {
+        sha0_block(h, p);
+        p += 64;
+        remaining -= 64;
+    }
+
+    memset(block, 0, 64);
+    memcpy(block, p, remaining);
+    block[remaining] = 0x80;
+    if (remaining >= 56) {
+        sha0_block(h, block);
+        memset(block, 0, 64);
+    }
+    for (i = 0; i < 8; i++)
+        block[56 + i] = (bits >> (56 - 8*i)) & 0xFF;
+    sha0_block(h, block);
+
+    for (i = 0; i < 5; i++) {
+        dest[4*i]   = (h[i] >> 24) & 0xFF;
+        dest[4*i+1] = (h[i] >> 16) & 0xFF;
+        dest[4*i+2] = (h[i] >>  8) & 0xFF;
+        dest[4*i+3] =  h[i]        & 0xFF;
+    }
+}
 
