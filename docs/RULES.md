@@ -206,11 +206,15 @@ $ procrule -r best64.rule 10m.pass | mdxfind -f 1m.txt stdin 10m.pass
 77,093 MD5x01 hashes found
 ```
 
-| Approach | Wall time | CPU time | Throughput | Hashes found |
-|----------|-----------|----------|------------|-------------|
-| Internal rules (`-r`) | 53s | 1m32s | 19.5M/s | 77,093 |
-| External pipe (procrule) | 32s | 4m56s | 29.5M/s | 77,093 |
+| Approach | Candidates | Wall time | CPU time | Throughput | Hashes found |
+|----------|-----------|-----------|----------|------------|-------------|
+| Internal rules (`-r`) | 1,038M | 53s | 1m32s | 19.5M/s | 77,093 |
+| External pipe (procrule) | 948M | 32s | 4m56s | 29.5M/s | 77,093 |
 
-The external pipe has higher wall-clock throughput because procrule runs in parallel on separate cores and mdxfind's no-rule inner loop is faster per candidate. However, internal rules use **3.2x less total CPU** — the SIMD rule batching amortizes the cost across 4 candidates per computation. On a busy system or when CPU cores are limited, internal rules are significantly more efficient.
+Several things to note:
 
-Both approaches find the same 77,093 hashes. Use internal rules (`-r`) when CPU efficiency matters; use procrule when you need the candidate list for other tools (hashcat, etc.) or when wall-clock time on an idle multi-core system is the priority.
+- **Candidate count differs.** procrule suppresses rules that produce no change (e.g., `l` on an already-lowercase word), generating 948M candidates. mdxfind's internal `-r` applies every rule to every word, generating 1,038M — about 9% more work.
+- **Internal rules use 3.2x less total CPU** despite processing more candidates. The SIMD rule batching and avoidance of I/O overhead between processes make internal rules far more CPU-efficient.
+- **External pipe is faster in wall time** on an idle multi-core system because procrule and mdxfind run on separate cores in parallel, and mdxfind's no-rule inner loop has higher per-candidate throughput (no rule bytecode interpretation overhead).
+
+Both approaches find the same 77,093 hashes. Use internal rules (`-r`) when CPU efficiency matters or cores are limited; use procrule when you need the candidate list for other tools (hashcat, etc.) or when wall-clock time on an idle multi-core system is the priority.
