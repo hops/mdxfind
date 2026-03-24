@@ -102,6 +102,7 @@ Expected finds: testfull=14,341,564, test50=7,169,180, test10=1,434,116.
 |---------|-----|-------|------|-----|-----|-------------|
 | dev1 | Apple M1 (8 cores) | 3.2 GHz | 3.0s | 2.0s | 1.0s | 4.7M/s |
 | mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | 8.0s | 4.0s | 1.0s | 1.8M/s |
+| firefly | AArch64 RK3399 (6 cores) | 2.0 GHz | 9.0s | 7.0s | 4.0s | 1.6M/s |
 | ubpower8 | POWER8 (8 cores) | 3.4 GHz | 29.0s | 14.0s | 3.0s | 0.5M/s |
 
 #### Small test (1M hashes)
@@ -110,7 +111,6 @@ Expected finds: sm-testfull=1,000,000, sm-test50=500,583, sm-test10=100,203.
 
 | Machine | CPU | Clock | Full | 50% | 10% | Rate (full) |
 |---------|-----|-------|------|-----|-----|-------------|
-| firefly | AArch64 RK3399 (6 cores) | 2.0 GHz | 3.0s | 3.0s | 3.0s | 4.8M/s |
 | pi3 | ARMv7 BCM2837 (4 cores) | 1.2 GHz | 7.0s | 6.0s | 6.0s | 2.0M/s |
 | pi1a | ARMv6 BCM2835 (1 core) | 700 MHz | 87.0s | 76.0s | 69.0s | 0.16M/s |
 
