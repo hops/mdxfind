@@ -193,3 +193,24 @@ $ mdxfind -r best64.rule -f 1m.txt 10m.pass           # with 77 rules
 Without SIMD batching, 77 rules would take 77 × 1.0s = **77 seconds**. The actual time is **53 seconds** — a 1.45x speedup from the 4-wide SIMD rule batching. The effective throughput of 19.5M/s (higher than the no-rule 13.5M/s) reflects the amortization of per-word overhead across multiple rule applications.
 
 The 77,093 hashes found (vs 16,898 without rules) show the dramatic improvement in coverage: 4.6x more hashes solved by trying common password mutations.
+
+### Internal Rules vs External Pipeline
+
+For comparison, the same candidates can be generated externally using procrule and piped into mdxfind. Since procrule suppresses rules that don't change the word, we also pass the original wordlist to ensure identical coverage:
+
+```
+$ procrule -r best64.rule 10m.pass | mdxfind -f 1m.txt stdin 10m.pass
+948,460,875 lines processed
+32.12 seconds hashing, 948,460,875 total hash calculations
+29.53M hashes per second
+77,093 MD5x01 hashes found
+```
+
+| Approach | Wall time | CPU time | Throughput | Hashes found |
+|----------|-----------|----------|------------|-------------|
+| Internal rules (`-r`) | 53s | 1m32s | 19.5M/s | 77,093 |
+| External pipe (procrule) | 32s | 4m56s | 29.5M/s | 77,093 |
+
+The external pipe has higher wall-clock throughput because procrule runs in parallel on separate cores and mdxfind's no-rule inner loop is faster per candidate. However, internal rules use **3.2x less total CPU** — the SIMD rule batching amortizes the cost across 4 candidates per computation. On a busy system or when CPU cores are limited, internal rules are significantly more efficient.
+
+Both approaches find the same 77,093 hashes. Use internal rules (`-r`) when CPU efficiency matters; use procrule when you need the candidate list for other tools (hashcat, etc.) or when wall-clock time on an idle multi-core system is the priority.
