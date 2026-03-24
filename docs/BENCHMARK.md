@@ -136,9 +136,13 @@ The salted benchmark is dramatically more expensive than unsalted because each c
 
 ## Community Benchmarks
 
-### mdxfind vs hashcat vs john — 2.5M MD5 hashes
+### mdxfind vs hashcat vs john — 25M hashes, 10 hash types
 
-Contributed by @A1131. 2,500,000 32-character hex hashes, 200MB wordlist, Ubuntu 24.04.
+Contributed by @A1131. 25,000,000 hashes, 200MB wordlist, Ubuntu 24.04. mdxfind tested all 10 types (MD5 through SHA256) simultaneously via `-m e1-e10`.
+
+```
+time ./mdxfind -m e1-e10 -f hashes.txt wordlist.txt
+```
 
 | Tool | Hardware | Time |
 |------|----------|------|
@@ -146,7 +150,7 @@ Contributed by @A1131. 2,500,000 32-character hex hashes, 200MB wordlist, Ubuntu
 | john | RTX 1050 Ti (GPU) | 31.1s |
 | hashcat | RTX 1050 Ti (GPU) | 56.9s |
 
-mdxfind on a laptop CPU outperformed both GPU-accelerated tools on a mid-range GPU. This reflects mdxfind's architecture: it loads all hashes into a Judy array and tests every candidate against the entire hash set in a single pass, whereas hashcat and john are optimized for smaller hash lists with deeper iteration counts.
+mdxfind on a laptop CPU outperformed both GPU-accelerated tools on a mid-range GPU — while simultaneously testing 10 hash types. This reflects mdxfind's architecture: it loads all hashes into a Judy array and tests every candidate against the entire hash set in a single pass, whereas hashcat and john are optimized for smaller hash lists with deeper iteration counts.
 
 mdxfind's advantage grows with hash list size — the Judy array lookup is O(1) regardless of whether there are 1,000 or 100,000,000 hashes loaded.
 
