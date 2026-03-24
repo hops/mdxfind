@@ -111,6 +111,7 @@ Expected finds: sm-testfull=1,000,000, sm-test50=500,583, sm-test10=100,203.
 
 | Machine | CPU | Clock | Full | 50% | 10% | Rate (full) |
 |---------|-----|-------|------|-----|-----|-------------|
+| firefly | AArch64 RK3399 (6 cores) | 2.0 GHz | 3.0s | 3.0s | 3.0s | 4.8M/s |
 | pi3 | ARMv7 BCM2837 (4 cores) | 1.2 GHz | 7.0s | 6.0s | 6.0s | 2.0M/s |
 | pi1a | ARMv6 BCM2835 (1 core) | 700 MHz | 87.0s | 76.0s | 69.0s | 0.16M/s |
 
