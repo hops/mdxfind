@@ -214,7 +214,7 @@ This prepends one digit and appends two digits to each candidate, for 10 x 100 =
 
 ## Rule-Based Password Mutations (-r and -R switches)
 
-mdxfind has built-in support for hashcat/JtR-compatible rules, applied directly during hash search. This is far more efficient than generating candidates externally and piping them in, because mdxfind applies the rules inside its inner loop and avoids I/O overhead.
+mdxfind has built-in support for hashcat/JtR-compatible rules, applied directly during hash search. This is far more efficient than generating candidates externally and piping them in, because mdxfind applies the rules inside its inner loop and avoids I/O overhead. See [RULES.md](RULES.md) for the complete rule reference.
 
 ### Basic rule usage (-r)
 
