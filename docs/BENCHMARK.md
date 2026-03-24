@@ -2,13 +2,13 @@
 
 ## Standard Benchmark Test Set
 
-A reproducible benchmark suite is available as release assets on the [v1.214 release page](https://github.com/Cynosureprime/mdxfind/releases/tag/v1.214):
+A reproducible benchmark suite is available for download from [www.mdxfind.com](http://www.mdxfind.com):
 
 | File | Contents | Size |
 |------|----------|------|
-| `rockyou.txt.gz` | Rockyou wordlist (14.3M passwords) | 49MB |
-| `mdxfind-benchmark-full.zip` | Full hash test files (14.3M hashes each) | 784MB |
-| `mdxfind-benchmark-small.zip` | Small hash test files (1M hashes each) | 55MB |
+| [rockyou.txt.gz](http://www.mdxfind.com/rockyou.txt.gz) | Rockyou wordlist (14.3M passwords) | 49MB |
+| [mdxfind-benchmark-full.zip](http://www.mdxfind.com/mdxfind-benchmark-full.zip) | Full hash test files (14.3M hashes each, unsalted + salted) | 1.7GB |
+| [mdxfind-benchmark-small.zip](http://www.mdxfind.com/mdxfind-benchmark-small.zip) | Small hash test files (1M hashes each, unsalted + salted) | 122MB |
 
 ### Test files
 
@@ -17,6 +17,8 @@ The benchmark hash files were generated from rockyou.txt using mdxfind itself:
 ```bash
 mdxfind -z -h '^MD5$' -f /dev/null rockyou.txt | cut -d' ' -f2 | cut -d: -f1 > testfull.txt
 ```
+
+### Unsalted MD5 test files
 
 | File | Hashes | Solvable | Description |
 |------|--------|----------|-------------|
@@ -27,21 +29,44 @@ mdxfind -z -h '^MD5$' -f /dev/null rockyou.txt | cut -d' ' -f2 | cut -d: -f1 > t
 | `sm-test50.txt` | 1,000,000 | ~50% | First 1M lines of test50.txt |
 | `sm-test10.txt` | 1,000,000 | ~10% | First 1M lines of test10.txt |
 
+### Salted MD5 test files
+
+Each line is `hash:salt` format, where the hash is MD5(original\_hash + salt) and the salt is a random 3-character string from the standard `3-salt` file.
+
+| File | Hashes | Solvable | Description |
+|------|--------|----------|-------------|
+| `saltfull.txt` | 14,341,564 | 100% | Salted version of testfull.txt |
+| `salt50.txt` | 14,341,564 | ~50% | Salted version of test50.txt |
+| `salt10.txt` | 14,341,564 | ~10% | Salted version of test10.txt |
+| `sm-saltfull.txt` | 1,000,000 | 100% | First 1M lines (for small/ARM hosts) |
+| `sm-salt50.txt` | 1,000,000 | ~50% | First 1M lines |
+| `sm-salt10.txt` | 1,000,000 | ~10% | First 1M lines |
+
 The reversed hashes simulate real-world conditions where only a fraction of the hash list is solvable with a given wordlist. The `test10.txt` scenario (10% solvable) is typical of working with large leaked hash collections.
 
 ### Running the benchmark
 
 ```bash
-# Full benchmark (needs ~14M-hash test files)
+# Full unsalted benchmark
 gunzip rockyou.txt.gz
 time mdxfind -f testfull.txt rockyou.txt > /dev/null
 time mdxfind -f test50.txt rockyou.txt > /dev/null
 time mdxfind -f test10.txt rockyou.txt > /dev/null
 
-# Small benchmark (for Raspberry Pi, etc.)
+# Full salted benchmark
+time mdxfind -M e31 -F saltfull.txt rockyou.txt > /dev/null
+time mdxfind -M e31 -F salt50.txt rockyou.txt > /dev/null
+time mdxfind -M e31 -F salt10.txt rockyou.txt > /dev/null
+
+# Small unsalted benchmark (for Raspberry Pi, etc.)
 time mdxfind -f sm-testfull.txt rockyou.txt > /dev/null
 time mdxfind -f sm-test50.txt rockyou.txt > /dev/null
 time mdxfind -f sm-test10.txt rockyou.txt > /dev/null
+
+# Small salted benchmark
+time mdxfind -M e31 -F sm-saltfull.txt rockyou.txt > /dev/null
+time mdxfind -M e31 -F sm-salt50.txt rockyou.txt > /dev/null
+time mdxfind -M e31 -F sm-salt10.txt rockyou.txt > /dev/null
 ```
 
 Report: CPU model, OS, thread count, wall-clock time, and hashes found for each test file.
