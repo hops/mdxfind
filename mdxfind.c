@@ -148,9 +148,18 @@ int Neon;
 #define mysha1 SHA1
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.214 2026/03/23 21:27:07 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.217 2026/03/24 04:28:02 dlr Exp dlr $";
 /*
  * $Log: mdxfind.c,v $
+ * Revision 1.217  2026/03/24 04:28:02  dlr
+ * Fix prmd5REV/prmd5UCREV: LUT conversion reversed nibble order within bytes
+ *
+ * Revision 1.216  2026/03/24 01:38:16  dlr
+ * Fix all compiler warnings with explicit casts
+ *
+ * Revision 1.215  2026/03/24 01:19:53  dlr
+ * Replace prmd5/prmd5UC/prmd5REV/prmd5UCREV with 512-byte LUT for 1.6x faster bin-to-hex
+ *
  * Revision 1.214  2026/03/23 21:27:07  dlr
  * Fix Windows stat overflow on files > 2GB: use _stat64 on _WIN32
  *
@@ -3023,61 +3032,84 @@ char *commify(unsigned long long source) {
 static char hextab[16] = "0123456789abcdef";
 static char hextabUC[16] = "0123456789ABCDEF";
 
-char *prmd5REV(unsigned char *md5, char *out, int len) {
-  char *ob;
-  int x;
-  unsigned char v;
+/* 512-byte LUT: hexlut_lc[byte*2] gives two lowercase ASCII hex chars */
+static const char hexlut_lc[512] =
+    "000102030405060708090a0b0c0d0e0f"
+    "101112131415161718191a1b1c1d1e1f"
+    "202122232425262728292a2b2c2d2e2f"
+    "303132333435363738393a3b3c3d3e3f"
+    "404142434445464748494a4b4c4d4e4f"
+    "505152535455565758595a5b5c5d5e5f"
+    "606162636465666768696a6b6c6d6e6f"
+    "707172737475767778797a7b7c7d7e7f"
+    "808182838485868788898a8b8c8d8e8f"
+    "909192939495969798999a9b9c9d9e9f"
+    "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"
+    "b0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+    "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf"
+    "d0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
+    "e0e1e2e3e4e5e6e7e8e9eaebecedeeef"
+    "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff";
 
-  ob = out + len;
-  *ob-- = 0;
-  for (x = 0; x < len / 2; x++) {
-    v = *md5++;
-    *ob-- = hextab[(v >> 4) & 0xf];
-    *ob-- = hextab[v & 0xf];
+static const char hexlut_uc[512] =
+    "000102030405060708090A0B0C0D0E0F"
+    "101112131415161718191A1B1C1D1E1F"
+    "202122232425262728292A2B2C2D2E2F"
+    "303132333435363738393A3B3C3D3E3F"
+    "404142434445464748494A4B4C4D4E4F"
+    "505152535455565758595A5B5C5D5E5F"
+    "606162636465666768696A6B6C6D6E6F"
+    "707172737475767778797A7B7C7D7E7F"
+    "808182838485868788898A8B8C8D8E8F"
+    "909192939495969798999A9B9C9D9E9F"
+    "A0A1A2A3A4A5A6A7A8A9AAABACADAEAF"
+    "B0B1B2B3B4B5B6B7B8B9BABBBCBDBEBF"
+    "C0C1C2C3C4C5C6C7C8C9CACBCCCDCECF"
+    "D0D1D2D3D4D5D6D7D8D9DADBDCDDDEDF"
+    "E0E1E2E3E4E5E6E7E8E9EAEBECEDEEEF"
+    "F0F1F2F3F4F5F6F7F8F9FAFBFCFDFEFF";
+
+char *prmd5REV(unsigned char *md5, char *out, int len) {
+  int binlen = len / 2;
+  char *ob = out + len;
+  *ob = 0;
+  for (int x = 0; x < binlen; x++) {
+    unsigned short pair = *(const unsigned short *)&hexlut_lc[*md5++ * 2];
+    *--ob = (char)(pair & 0xff);   /* high nibble char goes to lower address */
+    *--ob = (char)(pair >> 8);     /* low nibble char goes to lowest address */
   }
   return (out);
 }
 
 char *prmd5(unsigned char *md5, char *out, int len) {
-  char *ob;
-  int x;
-  unsigned char v;
-
-  ob = out;
-  for (x = 0; x < len / 2; x++) {
-    v = *md5++;
-    *ob++ = hextab[(v >> 4) & 0xf];
-    *ob++ = hextab[v & 0xf];
+  int binlen = len / 2;
+  char *ob = out;
+  for (int x = 0; x < binlen; x++) {
+    *(unsigned short *)ob = *(const unsigned short *)&hexlut_lc[*md5++ * 2];
+    ob += 2;
   }
   *ob = 0;
   return (out);
 }
 
 char *prmd5UCREV(unsigned char *md5, char *out, int len) {
-  char *ob;
-  int x;
-  unsigned char v;
-
-  ob = out + len;
-  *ob-- = 0;
-  for (x = 0; x < len / 2; x++) {
-    v = *md5++;
-    *ob-- = hextabUC[(v >> 4) & 0xf];
-    *ob-- = hextabUC[v & 0xf];
+  int binlen = len / 2;
+  char *ob = out + len;
+  *ob = 0;
+  for (int x = 0; x < binlen; x++) {
+    unsigned short pair = *(const unsigned short *)&hexlut_uc[*md5++ * 2];
+    *--ob = (char)(pair & 0xff);
+    *--ob = (char)(pair >> 8);
   }
   return (out);
 }
 
 char *prmd5UC(unsigned char *md5, char *out, int len) {
-  char *ob;
-  int x;
-  unsigned char v;
-
-  ob = out;
-  for (x = 0; x < len / 2; x++) {
-    v = *md5++;
-    *ob++ = hextabUC[(v >> 4) & 0xf];
-    *ob++ = hextabUC[v & 0xf];
+  int binlen = len / 2;
+  char *ob = out;
+  for (int x = 0; x < binlen; x++) {
+    *(unsigned short *)ob = *(const unsigned short *)&hexlut_uc[*md5++ * 2];
+    ob += 2;
   }
   *ob = 0;
   return (out);
@@ -10796,7 +10828,7 @@ nextbb:
                     if (slen < 29) continue;
                     const char *salt22 = setting + 7;
                     /* HMAC-SHA256(key=salt22[22 chars], data=password) */
-                    HMAC(EVP_sha256(), salt22, 22, cur, len,
+                    HMAC(EVP_sha256(), salt22, 22, (const unsigned char *)cur, len,
                          curin.h, &hmac_outlen);
                     /* base64 encode (RFC 4648, standard with padding) → 44 chars */
                     b64_encode((char *)curin.h, mdbuf, 32);
@@ -15528,7 +15560,7 @@ sha11saltmd5:
                       unsigned char id_byte = (trhex[(unsigned char)id_sep[1]] << 4) |
                                                trhex[(unsigned char)id_sep[2]];
                       /* decode challenge hex */
-                      int chall_binlen = get32(salt_str, (unsigned char *)tsalt + 1, chall_hexlen / 2);
+                      int chall_binlen = get32((char *)salt_str, (unsigned char *)tsalt + 1, chall_hexlen / 2);
                       if (chall_binlen <= 0) continue;
                       /* build MD5 input: id_byte + password + challenge_bytes */
                       mdbuf[0] = id_byte;
@@ -28935,7 +28967,7 @@ HAV256_5_start:
                     const char *b64salt = c1 + 1;
                     /* Decode base64 salt */
                     int incount;
-                    int salt_binlen = b64_decode(b64salt, (char *)qnx_salt, &incount);
+                    int salt_binlen = b64_decode((char *)b64salt, (char *)qnx_salt, &incount);
                     if (salt_binlen < 1 || salt_binlen > 256) continue;
                     /* PBKDF2-HMAC-SHA512 */
                     PKCS5_PBKDF2_HMAC((char *)cur, len, qnx_salt, salt_binlen,
@@ -29315,7 +29347,7 @@ HAV256_5_start:
                     HMAC(EVP_sha1(), wpa_pmk, 32, wpa_pmkid_data, 20,
                          curin.h, &hmac_len);
                     /* Hex-encode first 16 bytes → mdbuf (prmd5 len=bytes*2) */
-                    prmd5(curin.h, (unsigned char *)mdbuf, 32);
+                    prmd5(curin.h, (char *)mdbuf, 32);
                     mdbuf[32] = 0;
                     Word_t *PV2;
                     JSLG(PV2, JudyJ[JOB_WPA_PMKID], (unsigned char *)mdbuf);
@@ -29444,7 +29476,7 @@ HAV256_5_start:
                            curin.h, &hmac_len);
                     }
                     /* Hex-encode first 16 bytes → mdbuf (prmd5 len=bytes*2) */
-                    prmd5(curin.h, (unsigned char *)mdbuf, 32);
+                    prmd5(curin.h, (char *)mdbuf, 32);
                     mdbuf[32] = 0;
                     Word_t *PV2;
                     JSLG(PV2, JudyJ[JOB_WPA_EAPOL], (unsigned char *)mdbuf);
@@ -29525,7 +29557,7 @@ HAV256_5_start:
                            curin.h, &hmac_len);
                       hashcnt++;
                       /* Hex-encode first 16 bytes */
-                      prmd5(curin.h, (unsigned char *)mdbuf, 32);
+                      prmd5(curin.h, (char *)mdbuf, 32);
                       mdbuf[32] = 0;
                       Word_t *PV2;
                       JSLG(PV2, JudyJ[JOB_WPA_PMK], (unsigned char *)mdbuf);
@@ -29606,7 +29638,7 @@ HAV256_5_start:
                         HMAC(EVP_sha1(), ea_kck, 16, wpa_eapol, eapol_binlen,
                              curin.h, &hmac_len);
                       }
-                      prmd5(curin.h, (unsigned char *)mdbuf, 32);
+                      prmd5(curin.h, (char *)mdbuf, 32);
                       mdbuf[32] = 0;
                       Word_t *PV2;
                       JSLG(PV2, JudyJ[JOB_WPA_PMK], (unsigned char *)mdbuf);
@@ -29764,7 +29796,7 @@ HAV256_5_start:
                     int slen = saltsnap[si].saltlen;
                     if (slen < 29) continue;
                     /* HMAC-SHA384(key="wp-sha384", msg=password) */
-                    HMAC(EVP_sha384(), "wp-sha384", 9, cur, len,
+                    HMAC(EVP_sha384(), "wp-sha384", 9, (const unsigned char *)cur, len,
                          curin.h, &hmac_outlen);
                     /* base64 encode → 64 chars */
                     b64_encode((char *)curin.h, mdbuf, 48);
@@ -29840,7 +29872,7 @@ HAV256_5_start:
                     HMAC(EVP_sha256(), av_dk + 32, 32, av_ct, ct_binlen,
                          curin.h, &hmac_len);
                     /* Hex-encode full 32-byte HMAC → mdbuf */
-                    prmd5(curin.h, (unsigned char *)mdbuf, 64);
+                    prmd5(curin.h, (char *)mdbuf, 64);
                     mdbuf[64] = 0;
                     Word_t *PV2;
                     JSLG(PV2, JudyJ[JOB_ANSIBLE_VAULT], (unsigned char *)mdbuf);
@@ -30324,7 +30356,7 @@ HAV256_5_start:
                       /* Format: $keychain$*salt40hex*iv16hex*ct96hex */
                       char *hp2 = linebuf2;
                       hp2 += sprintf(hp2, "$keychain$*%.*s*%.*s*", 40, ts, 16, colon + 1);
-                      prmd5(kc_ct, (unsigned char *)hp2, 96);
+                      prmd5(kc_ct, (char *)hp2, 96);
                       hp2[96] = 0;
                       prfound(job, linebuf2);
                     } else {
@@ -30438,7 +30470,7 @@ HAV256_5_start:
                       char *hp2 = linebuf2;
                       hp2 += sprintf(hp2, "$iwork$%d$1$1$%d$%.*s$%.*s$",
                                      hv, iter, salthexlen, c2 + 1, 32, c3 + 1);
-                      prmd5(iw_ct, (unsigned char *)hp2, 128);
+                      prmd5(iw_ct, (char *)hp2, 128);
                       hp2[128] = 0;
                       prfound(job, linebuf2);
                     } else {
@@ -30887,7 +30919,7 @@ HAV256_5_start:
                       char *hp2 = linebuf2;
                       hp2 += sprintf(hp2, "SQLCIPHER*%d*%d*%.*s*%.*s*",
                                      sc_type, iter, 32, c2 + 1, 32, c3 + 1);
-                      prmd5(sc_ct, (unsigned char *)hp2, 32);
+                      prmd5(sc_ct, (char *)hp2, 32);
                       hp2[32] = 0;
                       prfound(job, linebuf2);
                     } else {
@@ -31646,12 +31678,12 @@ HAV256_5_start:
                       u16buf[u16len++] = (unsigned char)cur[ci];
                       u16buf[u16len++] = 0;
                     }
-                    MD4(u16buf, u16len, ntlm_hash);
+                    MD4((char *)u16buf, u16len, ntlm_hash);
                   }
                   for (si = 0; si < nsalts_job; si++) {
                     const char *ts = saltsnap[si].salt;
                     /* Decode 48-byte salt from hex */
-                    get32(ts, salt_bin, 48);
+                    get32((char *)ts, salt_bin, 48);
                     /* MD5(ntlm_hash + salt) */
                     memcpy(md5_block, ntlm_hash, 16);
                     memcpy(md5_block + 16, salt_bin, 48);
@@ -31944,11 +31976,11 @@ HAV256_5_start:
                     const char *datahex = c1 + 1;
                     /* Decode encrypted data */
                     unsigned char *encdata = (unsigned char *)newbuf;
-                    int enclen = get32(datahex, encdata, 32);
+                    int enclen = get32((char *)datahex, encdata, 32);
                     if (enclen != 32) continue;
                     /* PBKDF2-SHA256(UTF16LE(pass), empty_salt, iter, 32) */
                     unsigned char *dk = (unsigned char *)tsalt;
-                    pbkdf2_sha256(u16pass, u16len, (unsigned char *)"", 0, iter, dk, 32);
+                    pbkdf2_sha256((char *)u16pass, u16len, (unsigned char *)"", 0, iter, (char *)dk, 32);
                     hashcnt++;
                     if (Printall) {
                       /* -z mode: forward-generate by encrypting known plaintext */
@@ -32183,8 +32215,8 @@ HAV256_5_start:
                     const char *c2 = strchr(salthex, ':');
                     if (!c2 || (c2 - salthex) != 128) continue;
                     const char *cthex = c2 + 1;
-                    get32(salthex, vbk_salt, 64);
-                    get32(cthex, vbk_ct, 16);
+                    get32((char *)salthex, vbk_salt, 64);
+                    get32((char *)cthex, vbk_ct, 16);
                     /* PBKDF2-SHA1(UTF16LE(pass), salt, iter, 48) */
                     PKCS5_PBKDF2_HMAC_SHA1((char *)u16buf, u16len,
                         vbk_salt, 64, iter, 48, vbk_dk);
@@ -32287,7 +32319,7 @@ HAV256_5_start:
                     AES_ecb_encrypt(blk, vmx_ct, vmx_aeskey, AES_ENCRYPT);
                     char *hp2 = linebuf2;
                     hp2 += sprintf(hp2, "$vmx$0$%d$%.*s$%.*s", iter, 32, c1 + 1, 32, c2 + 1);
-                    prmd5(vmx_ct, (unsigned char *)hp2, 32);
+                    prmd5(vmx_ct, (char *)hp2, 32);
                     hp2[32] = 0;
                     prfound(job, linebuf2);
                   } else {
