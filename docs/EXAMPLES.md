@@ -423,12 +423,42 @@ Normally, when a salted hash is solved, the matching salt is removed from consid
 mdxfind -v -s salts.txt -h SALT -f hashes.txt wordlist.txt
 ```
 
-## Debug Output (-z switch)
+## Hash Generation / Debug Output (-z switch)
 
-Enable debug mode to see detailed information about hash matching:
+The `-z` switch generates hashes for every supported algorithm for each input word. Rather than searching for matches against an input hash list, it outputs every computed hash. This makes mdxfind a universal hash generator for any of its 994+ supported types.
+
+Use `-f /dev/null` since no input hashes are needed:
+
+```
+$ echo -e "test\npassword" | mdxfind -z -h '^MD5$,^SHA1$,^SHA256$,^NTLM$' -f /dev/null stdin
+MD5x01 098f6bcd4621d373cade4e832627b4f6:test
+SHA1x01 a94a8fe5ccb19ba61c4c0873d391e987982fbbd3:test
+SHA256x01 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08:test
+NTLMx01 0cb6948805f797bf2a82807973b89537:test
+MD5x01 5f4dcc3b5aa765d61d8327deb882cf99:password
+SHA1x01 5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8:password
+SHA256x01 5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8:password
+NTLMx01 8846f7eaee8fb117ad06bdd830b7586c:password
+```
+
+This is useful for:
+
+- **Creating test hash files** for validating mdxfind or other tools
+- **Verifying hash computations** — confirm that a known password produces the expected hash
+- **Exploring complex types** — see what MD5SHA1MD5 or SHA1SALTPASS actually compute
+- **Building reference sets** — generate hashes for a known wordlist across all types
+
+Combined with `-i` (iterations), `-s` (salts), and `-h` (type selection), you can generate hashes for virtually any scheme:
 
 ```bash
-mdxfind -z -f hashes.txt wordlist.txt
+# Generate iterated MD5 hashes
+echo "test" | mdxfind -z -i 1000 -h '^MD5$' -f /dev/null stdin
+
+# Generate salted hashes with a specific salt
+echo "test" | mdxfind -z -s salt_file.txt -h MD5SALT -f /dev/null stdin
+
+# Generate all supported hash types for a word
+echo "test" | mdxfind -z -h ALL -f /dev/null stdin
 ```
 
 ## Rule Hit Histogram (-Z switch)
