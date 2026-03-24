@@ -117,6 +117,18 @@ Report: CPU model, OS, thread count, wall-clock time, and hashes found for each 
 | pi1a | ARMv6 (BCM2835) | 700 MHz | sm-test50 (1M) | 500,583 | 76.0s | 0.19M/s |
 | pi1a | ARMv6 (BCM2835) | 700 MHz | sm-test10 (1M) | 100,203 | 69.0s | 0.21M/s |
 
+| mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | testfull (14.3M) | 14,341,564 | 8.0s | 1.8M/s |
+| mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | test50 (14.3M) | 7,169,180 | 4.0s | 3.6M/s |
+| mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | test10 (14.3M) | 1,434,116 | 1.0s | 14.3M/s |
+
+### Salted MD5SALT (e31) — sm-saltfull (1M hashes, 1M unique salts, rockyou.txt wordlist)
+
+| Machine | CPU | Clock | Found | Time | Hash calcs | Rate |
+|---------|-----|-------|-------|------|-----------|------|
+| mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | 1,000,000 | 1950s | 962B | 493M/s |
+
+The salted benchmark is dramatically more expensive than unsalted because each candidate must be tested against every unique salt. With 1M unique salts and 14.3M passwords, this requires ~962 billion hash computations. The 72-core Xeon sustained 493M hashes/second across all cores.
+
 **Notes:**
 - The M1 processes the full 14.3M hash set in 3 seconds — dominated by hash loading time, not computation.
 - Lower solvability (test10) runs faster because fewer hash matches trigger output processing.
