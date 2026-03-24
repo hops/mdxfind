@@ -117,6 +117,10 @@ Report: CPU model, OS, thread count, wall-clock time, and hashes found for each 
 | pi1a | ARMv6 (BCM2835) | 700 MHz | sm-test50 (1M) | 500,583 | 76.0s | 0.19M/s |
 | pi1a | ARMv6 (BCM2835) | 700 MHz | sm-test10 (1M) | 100,203 | 69.0s | 0.21M/s |
 
+### Unsalted MD5 — full test on multi-core servers (14.3M hashes, rockyou.txt wordlist)
+
+| Machine | CPU | Clock | Test | Found | Time | Rate |
+|---------|-----|-------|------|-------|------|------|
 | mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | testfull (14.3M) | 14,341,564 | 8.0s | 1.8M/s |
 | mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | test50 (14.3M) | 7,169,180 | 4.0s | 3.6M/s |
 | mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | test10 (14.3M) | 1,434,116 | 1.0s | 14.3M/s |
