@@ -65,7 +65,7 @@ mdxfind -f hashes.txt wordlist.txt
 
 ### Working on multiple lists simultaneously
 
-A major strength of mdxfind is its ability to search across many hash lists at once. By default, mdxfind reads hashes from stdin, so you can concatenate all your `.txt` files and pipe them in:
+A major strength of mdxfind is its ability to search across many hash lists at once. By default, mdxfind reads hashes from stdin, so you can concatenate all your `.txt` files and pipe them in.  Unlike virtually all other hash cracking programs, mdxfind does not care about exact hash lengths, or specific formats (with some exceptions for complex hashes).  Basically, as long as it is mostly there, mdxfind can probably parse it.
 
 ```bash
 cat *.txt | mdxfind wordlist.txt
@@ -77,7 +77,7 @@ Or use `-f` to load hashes from a file, which frees up stdin for other uses:
 mdxfind -f hashes.txt wordlist.txt
 ```
 
-mdxfind handles millions of hashes efficiently using Judy arrays for compressed storage.
+mdxfind handles millions, or billions of hashes efficiently using Judy arrays for compressed storage.
 
 In practice, a typical session looks like:
 
@@ -85,7 +85,7 @@ In practice, a typical session looks like:
 cat *.txt big/*.txt salted/*.txt | mdxfind -h ALL wordlist.txt > results.res
 ```
 
-The `-h ALL` flag tells mdxfind to try all hash types. You can also restrict to specific types:
+The `-h ALL` flag tells mdxfind to try many common hash types. You can also restrict to specific types:
 
 ```bash
 # Only MD5 through SHA256
@@ -115,10 +115,17 @@ Use `>>` (append) so you can run multiple sessions without losing earlier result
 
 ### Salt files
 
-For salted hash types, provide salt files with `-s`:
+For salted hash types, provide salt files with `-s`.  This is *great* when you have salted hashes without the salts present. For several salted algorithms, mdxfind can actually generate the missing salts.  But if you have them, you can use them:
 
 ```bash
-cat *.txt salted/*.txt | mdxfind -s salts.txt -h MD5SALT wordlist.txt >> session.res
+cut -c 34- salted/*.txt >salts.txt
+cat *.txt salted/*.txt | mdxfind -s salts.txt -h "^MD5SALT$" wordlist.txt >> session.res
+```
+
+If you know the type of algorithms, and the salts are present in the file, mdxfind can use them directly, too, using the -M and -F options
+
+```bash
+cat *.txt salted/*.txt | mdxfind -M e31 -F stdin wordlist.txt >> session.res
 ```
 
 ### Iterative solving
@@ -150,7 +157,7 @@ This is how your directory evolves over time:
 
 ```
 50m.orig          # Original, untouched
-50m.txt           # Input hashes (gets shorter as you remove solved ones)
+50m.txt           # Input hashes (fewer entries as you remove solved ones)
 50m.MD5x01        # Solved MD5 hashes
 50m.SHA1x02       # Solved SHA1 hashes
 50m.MD5SALTx01    # Solved salted MD5 hashes
