@@ -85,7 +85,7 @@ else
   ARGON2_FILL_OBJ = ref.o
 endif
 
-all: mdxfind mdsplit
+all: mdxfind mdsplit getpass
 
 mdxfind.o: mdxfind.c mdxfind.h
 	$(CC) $(CFLAGS) -c mdxfind.c
@@ -144,6 +144,12 @@ mdxfind: $(MDXFIND_OBJS) argon2/argon2.a lm/lm.a
 
 mdsplit: $(MDSPLIT_OBJS)
 	$(CC) $(LDFLAGS) -o mdsplit $(MDSPLIT_OBJS) libJudy.a
+
+getpass.o: getpass.c
+	$(CC) $(CFLAGS) -c getpass.c
+
+getpass: getpass.o
+	$(CC) $(LDFLAGS) -o getpass getpass.o
 
 clean:
 	rm -f mdxfind mdsplit $(MDXFIND_OBJS) $(MDSPLIT_OBJS)
