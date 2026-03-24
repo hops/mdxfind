@@ -2,6 +2,8 @@
 
 Multi-threaded, multi-algorithm hash search engine. Searches wordlists against large hash collections across 994 hash types simultaneously, using Judy arrays for memory-efficient hash storage and SIMD acceleration on supported platforms. Includes **mdsplit**, a companion tool that separates solved hashes by type into organized output files.
 
+See [HASH_TYPES.md](HASH_TYPES.md) for the complete list of supported hash types with hashcat mode mappings.
+
 Uses [yarn.c](https://github.com/madler/pigz) for threading, [libJudy](https://judy.sourceforge.net/) for compressed hash lookup, and [hashpipe](https://github.com/Cynosureprime/hashpipe) for hash verification.
 
 ## History
