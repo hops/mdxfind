@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="mdxfind" width="128">
+</p>
+
 # mdxfind
 
 Multi-threaded, multi-algorithm hash search engine. Searches wordlists against large hash collections across 994 hash types simultaneously, using Judy arrays for memory-efficient hash storage and SIMD acceleration on supported platforms. Includes **mdsplit**, a companion tool that separates solved hashes by type into organized output files.
