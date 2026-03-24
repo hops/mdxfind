@@ -92,38 +92,20 @@ Report: CPU model, OS, thread count, wall-clock time, and hashes found for each 
 
 ## Standard Benchmark Results
 
-### Unsalted MD5 — testfull (14.3M hashes, rockyou.txt wordlist)
+### Unsalted MD5 (rockyou.txt wordlist, sorted by testfull time)
 
-| Machine | CPU | Clock | Test | Found | Time | Rate |
-|---------|-----|-------|------|-------|------|------|
-| dev1 | Apple M1 | 3.2 GHz | testfull (14.3M) | 14,341,564 | 3.0s | 4.7M/s |
-| dev1 | Apple M1 | 3.2 GHz | test50 (14.3M) | 7,169,180 | 2.0s | 7.1M/s |
-| dev1 | Apple M1 | 3.2 GHz | test10 (14.3M) | 1,434,116 | 1.0s | 14.2M/s |
-| ubpower8 | POWER8 | 3.4 GHz | testfull (14.3M) | 14,341,564 | 29.0s | 0.5M/s |
-| ubpower8 | POWER8 | 3.4 GHz | test50 (14.3M) | 7,169,180 | 14.0s | 1.0M/s |
-| ubpower8 | POWER8 | 3.4 GHz | test10 (14.3M) | 1,434,116 | 3.0s | 4.8M/s |
+Full test files: 14,341,564 hashes. Small (`sm-`) test files: 1,000,000 hashes. Expected results: testfull=100%, test50=~50%, test10=~10% found.
 
-### Unsalted MD5 — small test (1M hashes, rockyou.txt wordlist)
+| Machine | CPU | Clock | Full | 50% | 10% | Rate (full) |
+|---------|-----|-------|------|-----|-----|-------------|
+| dev1 | Apple M1 (8 cores) | 3.2 GHz | 3.0s | 2.0s | 1.0s | 4.7M/s |
+| firefly | AArch64 RK3399 (6 cores) | 2.0 GHz | 3.0s\* | 3.0s\* | 3.0s\* | 4.8M/s |
+| pi3 | ARMv7 BCM2837 (4 cores) | 1.2 GHz | 7.0s\* | 6.0s\* | 6.0s\* | 2.0M/s |
+| mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | 8.0s | 4.0s | 1.0s | 1.8M/s |
+| ubpower8 | POWER8 (8 cores) | 3.4 GHz | 29.0s | 14.0s | 3.0s | 0.5M/s |
+| pi1a | ARMv6 BCM2835 (1 core) | 700 MHz | 87.0s\* | 76.0s\* | 69.0s\* | 0.16M/s |
 
-| Machine | CPU | Clock | Test | Found | Time | Rate |
-|---------|-----|-------|------|-------|------|------|
-| firefly | AArch64 (RK3399) | 2.0 GHz | sm-testfull (1M) | 1,000,000 | 3.0s | 4.8M/s |
-| firefly | AArch64 (RK3399) | 2.0 GHz | sm-test50 (1M) | 500,583 | 3.0s | 4.8M/s |
-| firefly | AArch64 (RK3399) | 2.0 GHz | sm-test10 (1M) | 100,203 | 3.0s | 4.8M/s |
-| pi3 | ARMv7 (BCM2837) | 1.2 GHz | sm-testfull (1M) | 1,000,000 | 7.0s | 2.0M/s |
-| pi3 | ARMv7 (BCM2837) | 1.2 GHz | sm-test50 (1M) | 500,583 | 6.0s | 2.4M/s |
-| pi3 | ARMv7 (BCM2837) | 1.2 GHz | sm-test10 (1M) | 100,203 | 6.0s | 2.4M/s |
-| pi1a | ARMv6 (BCM2835) | 700 MHz | sm-testfull (1M) | 1,000,000 | 87.0s | 0.16M/s |
-| pi1a | ARMv6 (BCM2835) | 700 MHz | sm-test50 (1M) | 500,583 | 76.0s | 0.19M/s |
-| pi1a | ARMv6 (BCM2835) | 700 MHz | sm-test10 (1M) | 100,203 | 69.0s | 0.21M/s |
-
-### Unsalted MD5 — full test on multi-core servers (14.3M hashes, rockyou.txt wordlist)
-
-| Machine | CPU | Clock | Test | Found | Time | Rate |
-|---------|-----|-------|------|-------|------|------|
-| mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | testfull (14.3M) | 14,341,564 | 8.0s | 1.8M/s |
-| mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | test50 (14.3M) | 7,169,180 | 4.0s | 3.6M/s |
-| mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | test10 (14.3M) | 1,434,116 | 1.0s | 14.3M/s |
+\* Small test files (1M hashes) — times not directly comparable to full (14.3M) tests.
 
 ### Salted MD5SALT (e31) — sm-saltfull (1M hashes, 1M unique salts, rockyou.txt wordlist)
 
@@ -134,8 +116,9 @@ Report: CPU model, OS, thread count, wall-clock time, and hashes found for each 
 The salted benchmark is dramatically more expensive than unsalted because each candidate must be tested against every unique salt. With 1M unique salts and 14.3M passwords, this requires ~962 billion hash computations. The 72-core Xeon sustained 493M hashes/second across all cores.
 
 **Notes:**
-- The M1 processes the full 14.3M hash set in 3 seconds — dominated by hash loading time, not computation.
+- The M1 processes the full 14.3M hash set in 3 seconds — hash loading time dominates.
 - Lower solvability (test10) runs faster because fewer hash matches trigger output processing.
+- The 72-core Xeon's per-thread rate is modest, but thread count gives it strong absolute throughput on salted workloads.
 - The ARMv6 Pi 1 is ~30x slower than the M1 but still functional for smaller hash sets.
 
 ## Community Benchmarks
