@@ -286,7 +286,7 @@ dep-mhash:
 	echo "  verified $$GOT"; \
 	cd $(DEPDIR)/mhash && \
 	autoreconf -i && \
-	./configure --enable-static --disable-shared && \
+	CFLAGS="-O2 -w -std=gnu89" ./configure --enable-static --disable-shared && \
 	$(MAKE); \
 	cp $(DEPDIR)/mhash/lib/.libs/libmhash.a $(TOPDIR)/; \
 	cp $(DEPDIR)/mhash/include/mhash.h $(TOPDIR)/; \
