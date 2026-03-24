@@ -211,3 +211,112 @@ mdxfind -N '?d' -n '?d?d' -f hashes.txt wordlist.txt
 ```
 
 This prepends one digit and appends two digits to each candidate, for 10 x 100 = 1,000 combinations per word.
+
+## Rule-Based Password Mutations (-r and -R switches)
+
+mdxfind has built-in support for hashcat/JtR-compatible rules, applied directly during hash search. This is far more efficient than generating candidates externally and piping them in, because mdxfind applies the rules inside its inner loop and avoids I/O overhead.
+
+### Basic rule usage (-r)
+
+Create a rule file with one rule per line:
+
+```
+# rules.txt
+l          # lowercase
+u          # uppercase
+c          # capitalize first letter
+d          # duplicate word
+$1         # append "1"
+^1         # prepend "1"
+r          # reverse
+```
+
+Apply it:
+
+```
+mdxfind -r rules.txt -f hashes.txt wordlist.txt
+```
+
+Given a wordlist containing "password", "test", and "hello", mdxfind will try every rule against every word: PASSWORD, TEST, HELLO, Password, Test, Hello, passwordpassword, testtest, hellohello, password1, test1, hello1, 1password, 1test, 1hello, drowssap, tset, olleh — in addition to the original words.
+
+```
+$ mdxfind -r rules.txt -f hashes.txt wordlist.txt
+7 rules read from rules.txt
+MD5x01 01ee9547a3f708f8fd986216bffd1eb7:1password
+MD5x01 b497dd1a701a33026f7211533620780d:drowssap
+MD5x01 033bd94b1168d7e4f0d644c3c95e35bf:TEST
+MD5x01 23b431acfeb41e15d466d75de822307c:hellohello
+23 total rule-generated passwords tested
+4 Total hashes found
+```
+
+### Multiple rule files — concatenated (-r)
+
+Using `-r` multiple times concatenates the rule sets:
+
+```
+# r1.txt: c, $1, $!
+# r2.txt: $2, $3
+mdxfind -r r1.txt -r r2.txt -f hashes.txt wordlist.txt
+# Result: 5 rules (c, $1, $!, $2, $3)
+```
+
+Each rule is applied independently to each word.
+
+### Multiple rule files — dot-product (-R)
+
+Using `-R` creates a cross-product of the rule sets. Each rule from the first file is combined with each rule from the second file:
+
+```
+# r1.txt: c, $1, $!
+# r2.txt: $2, $3
+mdxfind -R r1.txt -R r2.txt -f hashes.txt wordlist.txt
+# Result: 6 combined rules: c$2, c$3, $1$2, $1$3, $!$2, $!$3
+```
+
+For the word "password", this produces: Password2, Password3, password12, password13, password!2, password!3.
+
+```
+$ mdxfind -R r1.txt -R r2.txt -f hashes.txt wordlist.txt
+6 total rules in use
+MD5x01 c24a542f884e144451f9063b79e7994e:password12
+MD5x01 ee684912c7e588d03ccb40f17ed080c9:password13
+MD5x01 6f9dff5af05096ea9f23cc7bedd65683:Password2
+MD5x01 874fcc6e14275dde5a23319c9ce5f8e4:Password3
+4 Total hashes found
+```
+
+The dot-product is powerful for combining transformation rules (capitalize, toggle case) with suffix/prefix rules (append digits, special characters). Two rule files of 100 rules each produce 10,000 combined rules with `-R`.
+
+### Commonly used rules
+
+Popular hashcat rule files work directly with mdxfind:
+
+- `best64.rule` — 64 most effective rules from hashcat
+- `rockyou-30000.rule` — top 30,000 rules derived from the Rockyou leak
+- `toggles.rule` — case-toggling variations
+- `leetspeak.rule` — leet substitutions (a→@, e→3, etc.)
+
+```
+mdxfind -r best64.rule -f hashes.txt wordlist.txt >> results.res
+```
+
+### Rule statistics (-Z)
+
+Use `-Z` to see which rules produce the most hits:
+
+```
+mdxfind -r rules.txt -Z -f hashes.txt wordlist.txt
+```
+
+This prints a histogram of rule effectiveness after the run, helping you identify which rules are worth keeping for future sessions.
+
+### procrule: standalone rule processor
+
+For cases where you need to generate a candidate wordlist (e.g., for feeding into hashcat or other tools), [procrule](https://github.com/Cynosureprime/procrule) applies the same rule syntax as a standalone tool:
+
+```
+procrule -r rules.txt wordlist.txt > candidates.txt
+```
+
+procrule only emits words that were actually changed by a rule — if a rule produces the same output as the input, it is suppressed. This makes the output strictly additive to the original wordlist.
