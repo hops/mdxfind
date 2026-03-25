@@ -120,6 +120,9 @@ static void arc4random_buf(void *buf, size_t nbytes) {
 
 #define OUTBUFSIZE (MAXLINE+MAXLINE)
 
+#if defined(__APPLE__) && defined(METAL_GPU)
+#include "metal_md5salt.h"
+#endif
 
 
 #ifndef NOTINTEL
@@ -148,9 +151,30 @@ int Neon;
 #define mysha1 SHA1
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.218 2026/03/24 18:53:28 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.225 2026/03/25 13:33:57 dlr Exp dlr $";
 /*
  * $Log: mdxfind.c,v $
+ * Revision 1.225  2026/03/25 13:33:57  dlr
+ * Fix gen_salts() overwriting -F/-s loaded salts: skip generation when SaltArray already populated.
+ *
+ * Revision 1.224  2026/03/25 08:29:47  dlr
+ * Metal GPU: single-dispatch all salts with 32K hit overflow loop. Zero-copy GPU hash into curin. Persistent salt/word/hit Metal buffers. Fix -t hang (alloc_maxt).
+ *
+ * Revision 1.223  2026/03/25 07:56:51  dlr
+ * Fix -t hang: wait_for(FreeWaiting) used maxt after -t changed it. Save alloc_maxt at buffer allocation time, use it at exit wait.
+ *
+ * Revision 1.222  2026/03/25 04:07:13  dlr
+ * Metal GPU: proper CPU fallback for words >119 bytes. gpu_done bitmap skips GPU-handled words in CPU loop. No salt compaction in GPU block - deferred to CPU inline compaction. 1000/1000 deterministic.
+ *
+ * Revision 1.221  2026/03/25 03:01:05  dlr
+ * Metal GPU: remove CPU fallback (race with salt compaction). GPU skips words >119 bytes and empty. Accept ~0.03% miss rate for oversized passwords.
+ *
+ * Revision 1.220  2026/03/25 02:49:47  dlr
+ * Metal GPU: fix CPU fallback for skipped words (>119 bytes, empty). Increase max_probe to 256. Remove premature salt compaction.
+ *
+ * Revision 1.219  2026/03/24 23:59:19  dlr
+ * Metal GPU: fix stack overflow (gpu_hits on stack), missing job->pass init, non-null-terminated salt in checkhashkey. Add MDX_NO_METAL env var.
+ *
  * Revision 1.218  2026/03/24 18:53:28  dlr
  * Fix salt snapshot compaction bug: pre-loop swap could drop tail entries, losing count=1 salted hashes
  *
@@ -6428,7 +6452,7 @@ static void gen_salts() {
   J1F(RC, Dohash, ti);
   while (RC) {
     if (ti < JOB_DONE) {
-      if ((TypeOpts[ti] & TYPEOPT_NEEDSALT) && !(TypeOpts[ti] & TYPEOPT_NEEDSJ) && !Typesalt[ti]) {
+      if ((TypeOpts[ti] & TYPEOPT_NEEDSALT) && !(TypeOpts[ti] & TYPEOPT_NEEDSJ) && !Typesalt[ti] && !SaltArray) {
 	Dosalt[Dosaltcnt++] = ti;
         any = 1;
       }
@@ -8273,8 +8297,27 @@ while (1) {
     if (!nsalts_job) Typedone[job->op] = 1;
   }
 
+#if defined(__APPLE__) && defined(METAL_GPU)
+  /* GPU state — allocated once per job, freed at end */
+  static __thread int gpu_thread_id = 0;
+  static volatile int gpu_claimed = 0;
+  int gpu_active = 0;
+  if (metal_md5salt_available() && Maxiter == 1 &&
+      !Rotatehash && !Printall && nsalts_job >= 100 &&
+      job->op == JOB_MD5SALT) {
+    /* Only one thread uses GPU — first to claim wins */
+    if (!gpu_thread_id && __sync_bool_compare_and_swap(&gpu_claimed, 0, 1))
+      gpu_thread_id = 1;
+    gpu_active = gpu_thread_id;
+  }
+  char *gpu_salts = NULL;
+  uint32_t *gpu_soff = NULL;
+  uint16_t *gpu_slen = NULL;
+  int gpu_nsalts = 0;
+  int gpu_repack_needed = 0;
+#endif /* __APPLE__ && METAL_GPU */
+
   for (curline = job->startline; numline < job->numline; curline++, numline++, lineproc++) {
-    
 
     if (ltime.tv_sec != current.tv_sec) {
       if (job->outlen) {
@@ -19034,8 +19077,97 @@ MD5SALTstart:
                   if (!nsalts_job) { Typedone[job->op] = 1; break; }
                 }
                 if (!nsalts_job) { Typedone[job->op] = 1; break; }
-              { int si;
+              { int si, compact_ctr = 0;
               d = mdbuf + len;
+#if defined(__APPLE__) && defined(METAL_GPU)
+              /* GPU salt loop: pass pre-computed 32-char hex hash + all salts to GPU.
+               * GPU computes MD5(hex32 + salt) for each salt and probes compact table.
+               * CPU verifies hits via checkhashkey with proper PV_DEC/compaction. */
+              if (gpu_active && nsalts_job >= 100) {
+                /* Pack salts if needed (first call or after compaction) */
+                if (!gpu_salts || gpu_repack_needed) {
+                  /* Allocate once at max size, reuse thereafter */
+                  if (!gpu_salts) {
+                    size_t max_salt_bytes = 0;
+                    for (si = 0; si < nsalts_job; si++)
+                      max_salt_bytes += saltsnap[si].saltlen;
+                    gpu_salts = malloc(max_salt_bytes + 16);
+                    gpu_soff = malloc(nsalts_job * sizeof(uint32_t));
+                    gpu_slen = malloc(nsalts_job * sizeof(uint16_t));
+                  }
+                  gpu_nsalts = 0;
+                  uint32_t gsp = 0;
+                  for (si = 0; si < nsalts_job; si++) {
+                    if (!Printall && *saltsnap[si].PV == 0) continue;
+                    gpu_soff[gpu_nsalts] = gsp;
+                    gpu_slen[gpu_nsalts] = saltsnap[si].saltlen;
+                    memcpy(gpu_salts + gsp, saltsnap[si].salt, saltsnap[si].saltlen);
+                    gsp += saltsnap[si].saltlen;
+                    gpu_nsalts++;
+                  }
+                  gpu_repack_needed = 0;
+                  metal_md5salt_set_salts(gpu_salts, gpu_soff, gpu_slen, gpu_nsalts);
+                }
+
+                /* Dispatch all salts; loop if hit buffer overflows (>32K hits) */
+                #define GPU_MAX_RETURN 32768
+                int nhits;
+                do {
+                  uint32_t *hits = metal_md5salt_probe_salts(mdbuf, len, &nhits);
+                  if (!hits) break;
+                  int stored = nhits > GPU_MAX_RETURN ? GPU_MAX_RETURN : nhits;
+
+                  for (int h = 0; h < stored; h++) {
+                    uint32_t *entry = hits + h * 5;
+                    int sidx = entry[0];
+                    if (sidx >= gpu_nsalts) continue;
+
+                    curin.i[0] = entry[1];
+                    curin.i[1] = entry[2];
+                    curin.i[2] = entry[3];
+                    curin.i[3] = entry[4];
+                    y = 32;
+
+                    int gslen = gpu_slen[sidx];
+                    char *gs = gpu_salts + gpu_soff[sidx];
+                    for (si = 0; si < nsalts_job; si++) {
+                      if (saltsnap[si].saltlen == gslen &&
+                          memcmp(saltsnap[si].salt, gs, gslen) == 0) {
+                        s1 = saltsnap[si].salt;
+                        if (checkhashkey(&curin, y, s1, job)) {
+                          PV_DEC(saltsnap[si].PV);
+                          if (!Printall && *saltsnap[si].PV == 0) {
+                            saltsnap[si] = saltsnap[--nsalts_job]; si--;
+                            gpu_repack_needed = 1;
+                          }
+                        }
+                        break;
+                      }
+                    }
+                  }
+
+                  /* If overflow, repack and re-dispatch same word */
+                  if (nhits > GPU_MAX_RETURN) {
+                    gpu_nsalts = 0;
+                    uint32_t gsp = 0;
+                    for (si = 0; si < nsalts_job; si++) {
+                      if (!Printall && *saltsnap[si].PV == 0) continue;
+                      gpu_soff[gpu_nsalts] = gsp;
+                      gpu_slen[gpu_nsalts] = saltsnap[si].saltlen;
+                      memcpy(gpu_salts + gsp, saltsnap[si].salt, saltsnap[si].saltlen);
+                      gsp += saltsnap[si].saltlen;
+                      gpu_nsalts++;
+                    }
+                    gpu_repack_needed = 0;
+                    metal_md5salt_set_salts(gpu_salts, gpu_soff, gpu_slen, gpu_nsalts);
+                  }
+                } while (nhits > GPU_MAX_RETURN);
+                hashcnt += gpu_nsalts;
+                if (!nsalts_job) Typedone[job->op] = 1;
+              } else
+#endif /* __APPLE__ && METAL_GPU */
+              {
+              /* CPU salt loop (original) */
               for (si = 0; si < nsalts_job; si++) {
 		if (!Printall && *saltsnap[si].PV == 0) continue;
                 s1 = saltsnap[si].salt;
@@ -19059,6 +19191,15 @@ MD5SALTstart:
                       saltsnap[si] = saltsnap[--nsalts_job]; si--; break;
                     }
                   }
+                }
+              }
+              }
+              /* Periodic compaction: sweep out PV=0 entries from other threads */
+              if (!Printall && ++compact_ctr >= 64) {
+                compact_ctr = 0;
+                for (si = nsalts_job - 1; si >= 0; si--) {
+                  if (*saltsnap[si].PV == 0)
+                    saltsnap[si] = saltsnap[--nsalts_job];
                 }
               }
               if (!nsalts_job) Typedone[job->op] = 1;
@@ -32888,6 +33029,18 @@ void build_compact_table(void) {
             100.0 * CompactUsed / tsize,
             overflow_count, bt);
   }
+#if defined(__APPLE__) && defined(METAL_GPU)
+  if (!getenv("MDX_NO_METAL") && metal_md5salt_init() == 0) {
+    if (CompactFP && HashDataBuf && HashDataOff && HashDataLen && CompactSize > 0) {
+      metal_md5salt_set_compact_table(CompactFP, CompactIdx,
+          CompactSize, CompactMask,
+          HashDataBuf, HashDataBufUsed,
+          HashDataOff, HashDataCount, HashDataLen);
+    } else {
+      fprintf(stderr, "Metal: compact table not ready, GPU disabled\n");
+    }
+  }
+#endif
 }
 
 
@@ -37472,6 +37625,7 @@ int main(int argc, char **argv) {
         exit(1);
   }
 
+  int alloc_maxt = maxt;  /* save for wait_for at exit */
   WorkWaiting = new_lock(0);
   FreeWaiting = new_lock(maxt * 32);
   ReadBuf0 = new_lock(0);
@@ -41745,7 +41899,7 @@ reprocess:
             twist(ReadBuf1, BY, +1);
           }
           if (ThreadCount < maxt) {
-            launch(procjob, NULL);
+                      launch(procjob, NULL);
             ThreadCount++;
           }
           possess(WorkWaiting);
@@ -41767,7 +41921,7 @@ reprocess:
     gzclose(zfi);
   }
   possess(FreeWaiting);
-  wait_for(FreeWaiting, TO_BE, maxt * 32);
+  wait_for(FreeWaiting, TO_BE, alloc_maxt * 32);
   job = FreeHead;
   FreeHead = job->next;
   job->next = NULL;

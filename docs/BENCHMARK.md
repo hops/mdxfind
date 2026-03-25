@@ -100,6 +100,7 @@ Expected finds: testfull=14,341,564, test50=7,169,180, test10=1,434,116.
 
 | Machine | CPU | Clock | Full | 50% | 10% | Rate (full) |
 |---------|-----|-------|------|-----|-----|-------------|
+| dev3 | Apple M2 Max (12 cores) | 3.5 GHz | 3.0s | 2.0s | 1.0s | 4.7M/s |
 | dev1 | Apple M1 (8 cores) | 3.2 GHz | 3.0s | 2.0s | 1.0s | 4.7M/s |
 | mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | 8.0s | 4.0s | 1.0s | 1.8M/s |
 | firefly | AArch64 RK3399 (6 cores) | 2.0 GHz | 9.0s | 7.0s | 4.0s | 1.6M/s |
@@ -119,9 +120,10 @@ Expected finds: sm-testfull=1,000,000, sm-test50=500,583, sm-test10=100,203.
 
 | Machine | CPU | Clock | Found | Time | Hash calcs | Rate |
 |---------|-----|-------|-------|------|-----------|------|
+| dev3 | Apple M2 Max (12 cores) | 3.5 GHz | 1,000,000 | 4478s | 352B | 78.7M/s |
 | mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | 1,000,000 | 1950s | 962B | 493M/s |
 
-The salted benchmark is dramatically more expensive than unsalted because each candidate must be tested against every unique salt. With 1M unique salts and 14.3M passwords, this requires ~962 billion hash computations. The 72-core Xeon sustained 493M hashes/second across all cores.
+The salted benchmark is dramatically more expensive than unsalted because each candidate must be tested against every unique salt. With 1M unique salts and 14.3M passwords, this requires hundreds of billions of hash computations.
 
 **Notes:**
 - The M1 processes the full 14.3M hash set in 3 seconds — hash loading time dominates.
