@@ -57,8 +57,10 @@ int gpujob_init(int num_jobg);
  * Call from main() after all procjob threads have exited. */
 void gpujob_shutdown(void);
 
-/* Get a free JOBG from the pool. Blocks if none available. */
-struct jobg *gpujob_get_free(void);
+/* Get a free JOBG from the pool. Priority scheduling ensures earlier
+ * lines in the file get GPU buffers first. Pass NULL filename for
+ * shutdown sentinels (bypasses scheduling). */
+struct jobg *gpujob_get_free(char *filename, unsigned int startline);
 
 /* Submit a filled JOBG to the GPU work queue. */
 void gpujob_submit(struct jobg *g);

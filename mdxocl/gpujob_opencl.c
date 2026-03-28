@@ -55,6 +55,76 @@ static int _max_salt_count = 0;
 static int _max_salt_bytes = 0;
 static int overflow_loaded = 0;
 
+/* ---- GPU scheduling — priority buffer allocation ---- */
+struct gpu_waiter {
+    struct gpu_waiter *next;
+    char *filename;
+    unsigned int startline;
+    lock *wake;
+};
+
+static lock *GPUSchedLock;
+static char *gpu_sched_filename = NULL;
+static unsigned int gpu_sched_curline = 0;
+static int gpu_sched_active = 0;
+static struct gpu_waiter *gpu_waiter_head = NULL;
+static struct gpu_waiter *gpu_waiter_pool = NULL; /* pre-allocated pool */
+static int _gpu_waiter_count = 0;
+static int gpu_sched_active_count = 0; /* threads granted but not yet submitted */
+
+static void gpu_sched_wake_best(void) {
+    /* Called with GPUSchedLock possessed */
+    if (!gpu_waiter_head) return;
+
+    struct gpu_waiter *best = NULL;
+    struct gpu_waiter **best_pp = NULL;
+
+    /* Priority 1: same filename, lower-than-current line number */
+    if (gpu_sched_active) {
+        struct gpu_waiter **pp = &gpu_waiter_head;
+        while (*pp) {
+            struct gpu_waiter *w = *pp;
+            if (w->filename == gpu_sched_filename &&
+                w->startline <= gpu_sched_curline) {
+                if (!best || w->startline < best->startline) {
+                    best = w;
+                    best_pp = pp;
+                }
+            }
+            pp = &w->next;
+        }
+    }
+
+    /* Priority 2: no eligible same-file waiter found.
+     * If no active threads remain, we MUST wake someone to prevent deadlock.
+     * Pick lowest same-file line, or lowest (filename, line) overall. */
+    if (!best && gpu_waiter_head && gpu_sched_active_count == 0) {
+        struct gpu_waiter **pp = &gpu_waiter_head;
+        while (*pp) {
+            struct gpu_waiter *w = *pp;
+            if (!best ||
+                (uintptr_t)w->filename < (uintptr_t)best->filename ||
+                (w->filename == best->filename &&
+                 w->startline < best->startline)) {
+                best = w;
+                best_pp = pp;
+            }
+            pp = &w->next;
+        }
+    }
+
+    if (best) {
+        *best_pp = best->next;
+        best->next = NULL;
+        gpu_sched_filename = best->filename;
+        gpu_sched_curline = best->startline;
+        gpu_sched_active = 1;
+        gpu_sched_active_count++;
+        possess(best->wake);
+        twist(best->wake, TO, 1);
+    }
+}
+
 #define GPU_MAX_RETURN 32768
 #define OUTBUFSIZE (1024 * 1024)
 
@@ -328,6 +398,17 @@ int gpujob_init(int num_jobg) {
     GPUFreeWaiting = new_lock(num_jobg);
     GPUWorkTail = &GPUWorkHead;
 
+    /* Scheduler: pre-allocate maxt+1 waiter slots */
+    GPUSchedLock = new_lock(0);
+    release(GPUSchedLock);
+    _gpu_waiter_count = num_jobg;  /* at least maxt+1 */
+    for (int i = 0; i < _gpu_waiter_count; i++) {
+        struct gpu_waiter *w = (struct gpu_waiter *)calloc(1, sizeof(*w));
+        w->wake = new_lock(0);
+        w->next = gpu_waiter_pool;
+        gpu_waiter_pool = w;
+    }
+
     for (int i = 0; i < num_jobg; i++) {
         struct jobg *g = (struct jobg *)calloc(1, sizeof(struct jobg));
         if (!g) return -1;
@@ -359,7 +440,7 @@ void gpujob_shutdown(void) {
     release(GPUFreeWaiting);
 
     for (int i = 0; i < _gpujob_count; i++) {
-        struct jobg *sentinel = gpujob_get_free();
+        struct jobg *sentinel = gpujob_get_free(NULL, 0);
         sentinel->op = 2000;
         sentinel->count = 0;
         sentinel->line_num = 0;
@@ -368,7 +449,51 @@ void gpujob_shutdown(void) {
     _gpujob_ready = 0;
 }
 
-struct jobg *gpujob_get_free(void) {
+struct jobg *gpujob_get_free(char *filename, unsigned int startline) {
+    /* NULL filename = shutdown sentinel, skip scheduling */
+    if (!filename) goto get_buffer;
+
+    possess(GPUSchedLock);
+
+    if (!gpu_sched_active) {
+        /* No current file — take over */
+        gpu_sched_filename = filename;
+        gpu_sched_curline = startline;
+        gpu_sched_active = 1;
+        gpu_sched_active_count++;
+        release(GPUSchedLock);
+    } else if (filename == gpu_sched_filename && startline <= gpu_sched_curline) {
+        /* Same file, equal or lower line — grant immediately */
+        if (startline < gpu_sched_curline)
+            gpu_sched_curline = startline;
+        gpu_sched_active_count++;
+        release(GPUSchedLock);
+    } else {
+        /* Must wait — get a waiter from pool */
+        struct gpu_waiter *w = gpu_waiter_pool;
+        if (w) gpu_waiter_pool = w->next;
+        else w = (struct gpu_waiter *)calloc(1, sizeof(*w));
+        if (!w->wake) w->wake = new_lock(0);
+        w->filename = filename;
+        w->startline = startline;
+        w->next = gpu_waiter_head;
+        gpu_waiter_head = w;
+        lock *my_wake = w->wake;
+        release(GPUSchedLock);
+
+        /* Sleep until woken by scheduler */
+        possess(my_wake);
+        wait_for(my_wake, TO_BE, 1);
+        twist(my_wake, TO, 0);
+
+        /* Return waiter to pool */
+        possess(GPUSchedLock);
+        w->next = gpu_waiter_pool;
+        gpu_waiter_pool = w;
+        release(GPUSchedLock);
+    }
+
+get_buffer:
     possess(GPUFreeWaiting);
     wait_for(GPUFreeWaiting, NOT_TO_BE, 0);
     struct jobg *g = GPUFreeHead;
@@ -385,15 +510,15 @@ struct jobg *gpujob_get_free(void) {
 void gpujob_submit(struct jobg *g) {
     g->next = NULL;
     possess(GPUWorkWaiting);
-    /* Sorted insertion by line_num — lower line numbers dispatched first */
-    struct jobg **pp = &GPUWorkHead;
-    while (*pp && (*pp)->line_num <= g->line_num)
-        pp = &(*pp)->next;
-    g->next = *pp;
-    *pp = g;
-    if (g->next == NULL)
-        GPUWorkTail = &(g->next);
+    *GPUWorkTail = g;
+    GPUWorkTail = &(g->next);
     twist(GPUWorkWaiting, BY, +1);
+
+    /* Wake the best waiting procjob thread */
+    possess(GPUSchedLock);
+    gpu_sched_active_count--;
+    gpu_sched_wake_best();
+    release(GPUSchedLock);
 }
 
 int gpujob_available(void) {

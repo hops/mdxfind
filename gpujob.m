@@ -381,7 +381,7 @@ void gpujob_shutdown(void) {
     if (!_gpujob_ready) return;
 
     for (int i = 0; i < _gpujob_count; i++) {
-        struct jobg *sentinel = gpujob_get_free();
+        struct jobg *sentinel = gpujob_get_free(NULL, 0);
         sentinel->op = 2000;
         sentinel->count = 0;
         gpujob_submit(sentinel);
@@ -390,7 +390,8 @@ void gpujob_shutdown(void) {
     _gpujob_ready = 0;
 }
 
-struct jobg *gpujob_get_free(void) {
+struct jobg *gpujob_get_free(char *filename, unsigned int startline) {
+    (void)filename; (void)startline; /* scheduling not yet implemented for Metal */
     possess(GPUFreeWaiting);
     wait_for(GPUFreeWaiting, NOT_TO_BE, 0);
     struct jobg *g = GPUFreeHead;

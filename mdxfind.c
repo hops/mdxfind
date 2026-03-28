@@ -162,9 +162,12 @@ int Neon;
 #define mysha1 SHA1
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.237 2026/03/28 11:09:56 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.238 2026/03/28 13:34:48 dlr Exp dlr $";
 /*
  * $Log: mdxfind.c,v $
+ * Revision 1.238  2026/03/28 13:34:48  dlr
+ * Pass job->filename and job->startline to gpujob_get_free for GPU priority scheduling.
+ *
  * Revision 1.237  2026/03/28 11:09:56  dlr
  * GPU: fix -G filter to parse device list immediately (optarg is transient).
  * Replace gpu_device_filter string pointer with gpu_device_filter_set + gpu_device_allowed[] array.
@@ -19134,7 +19137,7 @@ MD5SALTstart:
                   (job->op == JOB_MD5SALT || job->op == JOB_MD5revMD5SALT ||
                    job->op == JOB_MD5UCSALT || job->op == JOB_MD5sub8_24SALT)) {
                 if (!my_jobg) {
-                  my_jobg = gpujob_get_free();
+                  my_jobg = gpujob_get_free(job->filename, job->startline);
                   my_jobg->op = job->op;
                   my_jobg->filename = job->filename;
                   my_jobg->flags = job->flags;
@@ -19256,7 +19259,7 @@ MD5SALTstart:
                   (job->op == JOB_MD5SALT || job->op == JOB_MD5revMD5SALT ||
                    job->op == JOB_MD5UCSALT || job->op == JOB_MD5sub8_24SALT)) {
                 if (!my_jobg) {
-                  my_jobg = gpujob_get_free();
+                  my_jobg = gpujob_get_free(job->filename, job->startline);
                   my_jobg->op = job->op;
                   my_jobg->filename = job->filename;
                   my_jobg->flags = job->flags;
