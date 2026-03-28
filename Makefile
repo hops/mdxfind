@@ -41,14 +41,28 @@ ifeq ($(UNAME_S),Darwin)
 else ifeq ($(UNAME_S),FreeBSD)
   OSOPT =
   ICONV = /usr/local/lib/libiconv.a
-  LDEXTRA = -Wl,--allow-multiple-definition
+  LDEXTRA = -Wl,--allow-multiple-definition -L/usr/local/lib
   INCEXTRA = -I/usr/local/include
+  # OpenCL GPU acceleration on FreeBSD (requires: pkg install opencl ocl-icd)
+  ifeq ($(UNAME_M),x86_64)
+    OPENCL_GPU = 1
+    OSOPT += -DOPENCL_GPU=1
+    LDEXTRA += -lOpenCL
+  endif
 else
   # Linux and others
   OSOPT =
   ICONV =
   LDEXTRA = -ldl
   INCEXTRA = -I/usr/local/include
+  # OpenCL GPU acceleration on Linux x86_64 (requires: OpenCL headers + ICD loader)
+  ifeq ($(UNAME_M),x86_64)
+    ifneq ($(wildcard /usr/include/CL/cl.h /usr/local/include/CL/cl.h),)
+      OPENCL_GPU = 1
+      OSOPT += -DOPENCL_GPU=1
+      LDEXTRA += -lOpenCL
+    endif
+  endif
 endif
 
 # GCC needs -fgnu89-inline to emit out-of-line copies of inline functions
@@ -80,6 +94,12 @@ endif
 # Metal GPU objects (macOS only)
 ifdef METAL_GPU
   MDXFIND_OBJS += metal_md5salt.o gpujob.o
+endif
+
+# OpenCL GPU objects (Linux, FreeBSD, Windows)
+ifdef OPENCL_GPU
+  MDXFIND_OBJS += mdxocl/opencl_md5salt.o mdxocl/gpujob_opencl.o
+  CFLAGS += -Imdxocl
 endif
 
 # argon2 fill-block selection: SSE on x86_64, portable ref elsewhere
@@ -148,6 +168,15 @@ else
 endif
 endif
 
+# OpenCL GPU source files (Linux, FreeBSD)
+ifdef OPENCL_GPU
+mdxocl/opencl_md5salt.o: mdxocl/opencl_md5salt.c mdxocl/opencl_md5salt.h mdxocl/md5salt_kernel_str.h
+	$(CC) -DOPENCL_GPU=1 -DCL_TARGET_OPENCL_VERSION=120 -I. -Imdxocl $(INCEXTRA) -O3 -pthread -c mdxocl/opencl_md5salt.c -o mdxocl/opencl_md5salt.o
+
+mdxocl/gpujob_opencl.o: mdxocl/gpujob_opencl.c mdxocl/opencl_md5salt.h gpujob.h mdxfind.h
+	$(CC) -DOPENCL_GPU=1 -I. -Imdxocl $(INCEXTRA) -O3 -pthread -c mdxocl/gpujob_opencl.c -o mdxocl/gpujob_opencl.o
+endif
+
 mdsplit.o: mdsplit.c
 	$(CC) $(CFLAGS) -c mdsplit.c
 
@@ -178,6 +207,7 @@ clean:
 	rm -f argon2/*.o argon2/argon2.a
 	rm -f lm/*.o lm/lm.a
 	rm -f gosthash/*.o
+	rm -f mdxocl/*.o
 
 distclean: clean
 	rm -rf deps

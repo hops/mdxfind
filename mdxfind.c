@@ -120,8 +120,18 @@ static void arc4random_buf(void *buf, size_t nbytes) {
 
 #define OUTBUFSIZE (MAXLINE+MAXLINE)
 
+#if (defined(__APPLE__) && defined(METAL_GPU)) || defined(CUDA_GPU) || defined(OPENCL_GPU)
+#define GPU_ENABLED 1
+#endif
+
+#ifdef GPU_ENABLED
 #if defined(__APPLE__) && defined(METAL_GPU)
 #include "metal_md5salt.h"
+#elif defined(CUDA_GPU)
+#include "cuda_md5salt.h"
+#elif defined(OPENCL_GPU)
+#include "opencl_md5salt.h"
+#endif
 #include "gpujob.h"
 #endif
 
@@ -152,9 +162,21 @@ int Neon;
 #define mysha1 SHA1
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.234 2026/03/27 17:56:55 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.237 2026/03/28 11:09:56 dlr Exp dlr $";
 /*
  * $Log: mdxfind.c,v $
+ * Revision 1.237  2026/03/28 11:09:56  dlr
+ * GPU: fix -G filter to parse device list immediately (optarg is transient).
+ * Replace gpu_device_filter string pointer with gpu_device_filter_set + gpu_device_allowed[] array.
+ *
+ * Revision 1.236  2026/03/28 10:19:36  dlr
+ * GPU: stamp jobg line_num from job->startline for priority dispatch ordering.
+ * Add gpu_device_filter global. Add -G list immediate exit via opencl_md5salt_list_devices().
+ * Intel GPU path: add line_num stamp.
+ *
+ * Revision 1.235  2026/03/27 23:14:48  dlr
+ * Add OPENCL_GPU support to GPU_ENABLED macro, init, compact table, and available checks. Three GPU backends: Metal (macOS), CUDA (NVIDIA), OpenCL (cross-vendor).
+ *
  * Revision 1.234  2026/03/27 17:56:55  dlr
  * Remove Maxiter==1 restriction from GPU eligibility check — iteration now handled by GPU iter kernel.
  *
@@ -1495,8 +1517,10 @@ static void blake2b_hash(unsigned char *out, size_t outlen,
 }
 
 int NoMarkSalt, Hexkey, Rotatehash, Unicode, Dedupe, XMLchar, Email, Printall;
-#if defined(__APPLE__) && defined(METAL_GPU)
+#ifdef GPU_ENABLED
 int NoMetal;
+int gpu_device_filter_set = 0;     /* 1 if -G specified device list */
+int gpu_device_allowed[64];        /* per-device allow flags */
 #endif
 
 
@@ -8163,7 +8187,7 @@ SSEBUF[15]=_mm_setzero_si128();
 #endif
 rhash_con = NULL;
 argon2_ws = NULL;
-#if defined(__APPLE__) && defined(METAL_GPU)
+#ifdef GPU_ENABLED
 struct jobg *my_jobg = NULL;
 #endif
 
@@ -8176,7 +8200,7 @@ while (1) {
     exit(1);
   }
   if (job->op == JOB_DONE) {
-#if defined(__APPLE__) && defined(METAL_GPU)
+#ifdef GPU_ENABLED
     if (my_jobg && my_jobg->count > 0) {
       gpujob_submit(my_jobg);
       my_jobg = NULL;
@@ -19102,7 +19126,7 @@ MD5SALTstart:
                 if (!nsalts_job) { Typedone[job->op] = 1; break; }
               { int si, compact_ctr = 0;
               d = mdbuf + len;
-#if defined(__APPLE__) && defined(METAL_GPU)
+#ifdef GPU_ENABLED
               /* GPU path: pack this word's hex hash into a JOBG batch.
                * gpujob() thread handles the actual GPU dispatch. */
               if (gpujob_available() && !Rotatehash && !Printall &&
@@ -19115,6 +19139,7 @@ MD5SALTstart:
                   my_jobg->filename = job->filename;
                   my_jobg->flags = job->flags;
                   my_jobg->doneprint = job->doneprint;
+                  my_jobg->line_num = job->startline;
                 }
                 int idx = my_jobg->count;
                 /* Pre-pack hex hash into M[] words for GPU, per algorithm */
@@ -19174,7 +19199,7 @@ MD5SALTstart:
                 }
                 hashcnt += nsalts_job;
               } else
-#endif /* __APPLE__ && METAL_GPU */
+#endif /* GPU_ENABLED */
               {
               /* CPU salt loop (original) */
               for (si = 0; si < nsalts_job; si++) {
@@ -19224,6 +19249,79 @@ MD5SALTstart:
                   if (!nsalts_job) { Typedone[job->op] = 1; break; }
                 }
                 if (!nsalts_job) { Typedone[job->op] = 1; break; }
+#ifdef GPU_ENABLED
+              /* GPU path (Intel): pack into JOBG and skip SSE salt loop */
+              if (gpujob_available() && !Rotatehash && !Printall &&
+                  nsalts_job >= 100 &&
+                  (job->op == JOB_MD5SALT || job->op == JOB_MD5revMD5SALT ||
+                   job->op == JOB_MD5UCSALT || job->op == JOB_MD5sub8_24SALT)) {
+                if (!my_jobg) {
+                  my_jobg = gpujob_get_free();
+                  my_jobg->op = job->op;
+                  my_jobg->filename = job->filename;
+                  my_jobg->flags = job->flags;
+                  my_jobg->doneprint = job->doneprint;
+                  my_jobg->line_num = job->startline;
+                }
+                { int idx = my_jobg->count;
+                /* Pre-pack hex hash into M[] words, same as NOTINTEL path */
+                { uint32_t *mw = (uint32_t *)my_jobg->hexhash[idx];
+                  unsigned char *hb = curin.h;
+                  const char *lut;
+                  switch (job->op) {
+                  case JOB_MD5UCSALT:
+                    lut = hexlut_uc;
+                    for (int mi = 0; mi < 8; mi++) {
+                      unsigned short h0 = *(unsigned short *)&lut[hb[mi*2] * 2];
+                      unsigned short h1 = *(unsigned short *)&lut[hb[mi*2+1] * 2];
+                      mw[mi] = h0 | ((uint32_t)h1 << 16);
+                    }
+                    my_jobg->hexlen[idx] = 32;
+                    break;
+                  case JOB_MD5revMD5SALT:
+                    { char revbuf[36];
+                      prmd5REV(hb, revbuf, 32);
+                      for (int mi = 0; mi < 8; mi++)
+                        mw[mi] = *(uint32_t *)&revbuf[mi * 4];
+                    }
+                    my_jobg->hexlen[idx] = 32;
+                    break;
+                  case JOB_MD5sub8_24SALT:
+                    for (int mi = 0; mi < 4; mi++) {
+                      unsigned short h0 = *(unsigned short *)&hexlut_lc[hb[4 + mi*2] * 2];
+                      unsigned short h1 = *(unsigned short *)&hexlut_lc[hb[4 + mi*2+1] * 2];
+                      mw[mi] = h0 | ((uint32_t)h1 << 16);
+                    }
+                    mw[4] = mw[5] = mw[6] = mw[7] = 0;
+                    my_jobg->hexlen[idx] = 16;
+                    break;
+                  default: /* JOB_MD5SALT */
+                    for (int mi = 0; mi < 8; mi++) {
+                      unsigned short h0 = *(unsigned short *)&hexlut_lc[hb[mi*2] * 2];
+                      unsigned short h1 = *(unsigned short *)&hexlut_lc[hb[mi*2+1] * 2];
+                      mw[mi] = h0 | ((uint32_t)h1 << 16);
+                    }
+                    my_jobg->hexlen[idx] = 32;
+                    break;
+                  }
+                }
+                my_jobg->passoff[idx] = my_jobg->passbuf_pos;
+                memcpy(&my_jobg->passbuf[my_jobg->passbuf_pos], job->pass, job->clen);
+                my_jobg->passlen[idx] = job->clen;
+                my_jobg->clen[idx] = job->clen;
+                my_jobg->ruleindex[idx] = job->Ruleindex;
+                my_jobg->passbuf_pos += job->clen;
+                my_jobg->count++;
+                }
+                if (my_jobg->count >= GPUBATCH_MAX ||
+                    my_jobg->passbuf_pos + MAXLINE > GPUBATCH_PASS) {
+                  gpujob_submit(my_jobg);
+                  my_jobg = NULL;
+                }
+                hashcnt += nsalts_job;
+                break;
+              }
+#endif /* GPU_ENABLED */
                 init_md5sse(cur, len, SSEBUF);
                 done2 = 0;
                 maxsaltlens = maxsaltlen = 0;
@@ -32603,7 +32701,7 @@ HAV256_5_start:
         } while (curkey);
       } while (((job->flags & JOBFLAG_NUMBERS) && (++number_iter < (job->MaskCount ? job->MaskCount : Iter_Count[job->digits]))) || currule || (Email && emailcur < emailpow));
     }
-#if defined(__APPLE__) && defined(METAL_GPU)
+#ifdef GPU_ENABLED
     /* Flush partial GPU batch at end of job */
     if (my_jobg && my_jobg->count > 0) {
       gpujob_submit(my_jobg);
@@ -33045,15 +33143,38 @@ void build_compact_table(void) {
             100.0 * CompactUsed / tsize,
             overflow_count, bt);
   }
+#ifdef GPU_ENABLED
+  if (!NoMetal) {
+    int gpu_ok = -1;
 #if defined(__APPLE__) && defined(METAL_GPU)
-  if (!NoMetal && metal_md5salt_init() == 0) {
-    if (CompactFP && HashDataBuf && HashDataOff && HashDataLen && CompactSize > 0) {
+    gpu_ok = metal_md5salt_init();
+#elif defined(CUDA_GPU)
+    gpu_ok = cuda_md5salt_init();
+#elif defined(OPENCL_GPU)
+    gpu_ok = opencl_md5salt_init();
+#endif
+    if (gpu_ok == 0 && CompactFP && HashDataBuf && HashDataOff && HashDataLen && CompactSize > 0) {
+#if defined(__APPLE__) && defined(METAL_GPU)
       metal_md5salt_set_compact_table(CompactFP, CompactIdx,
           CompactSize, CompactMask,
           HashDataBuf, HashDataBufUsed,
           HashDataOff, HashDataCount, HashDataLen);
-    } else {
-      fprintf(stderr, "Metal: compact table not ready, GPU disabled\n");
+#elif defined(CUDA_GPU)
+      cuda_md5salt_set_compact_table(CompactFP, CompactIdx,
+          CompactSize, CompactMask,
+          HashDataBuf, HashDataBufUsed,
+          HashDataOff, HashDataCount, HashDataLen);
+#elif defined(OPENCL_GPU)
+      { int ndev = opencl_md5salt_num_devices();
+        for (int di = 0; di < ndev; di++)
+          opencl_md5salt_set_compact_table(di, CompactFP, CompactIdx,
+              CompactSize, CompactMask,
+              HashDataBuf, HashDataBufUsed,
+              HashDataOff, HashDataCount, HashDataLen);
+      }
+#endif
+    } else if (gpu_ok == 0) {
+      fprintf(stderr, "GPU: compact table not ready, GPU disabled\n");
     }
   }
 #endif
@@ -37688,7 +37809,7 @@ int main(int argc, char **argv) {
   inhashcnt = 0;
   current_utc_time(&starthash);
 
-  while ((ch = getopt(argc, argv, "?abcdelpvVyzZGf:g:h:i:j:k:m:n:q:r:s:t:u:w:x:F:J:N:R:M:S:U:P:X:")) != -1) {
+  while ((ch = getopt(argc, argv, "?abcdelpvVyzZG:f:g:h:i:j:k:m:n:q:r:s:t:u:w:x:F:J:N:R:M:S:U:P:X:")) != -1) {
     switch (ch) {
       case 'X':
         s = optarg;
@@ -37816,10 +37937,46 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Rule Histogram enabled\n");
         DoHistogram = 1;
         break;
-#if defined(__APPLE__) && defined(METAL_GPU)
+#ifdef GPU_ENABLED
       case 'G':
-        fprintf(stderr, "Metal GPU disabled\n");
-        NoMetal = 1;
+        /* -G <list> selects specific GPU devices by index.
+         * Format: comma-separated IDs or ranges: 0,2,4 or 0-2,5,7-9
+         * -G none or -G n/N disables GPU entirely.
+         * -G list: enumerate GPU devices and exit immediately. */
+        if (optarg[0] == 'l' || optarg[0] == 'L') {
+          fprintf(stderr, "Available GPU devices:\n");
+#if defined(OPENCL_GPU)
+          opencl_md5salt_list_devices();
+#elif defined(__APPLE__) && defined(METAL_GPU)
+          /* TODO: metal list */
+#endif
+          exit(0);
+        } else if (optarg[0] == 'n' || optarg[0] == 'N') {
+          fprintf(stderr, "GPU disabled\n");
+          NoMetal = 1;
+        } else {
+          /* Parse device list immediately — optarg is transient */
+          extern int gpu_device_filter_set;
+          extern int gpu_device_allowed[];
+          gpu_device_filter_set = 1;
+          memset(gpu_device_allowed, 0, sizeof(gpu_device_allowed));
+          const char *s = optarg;
+          while (*s) {
+            while (*s == ',' || *s == ' ') s++;
+            if (!*s) break;
+            int lo = 0;
+            while (*s >= '0' && *s <= '9') { lo = lo * 10 + *s - '0'; s++; }
+            int hi = lo;
+            if (*s == '-') {
+              s++;
+              hi = 0;
+              while (*s >= '0' && *s <= '9') { hi = hi * 10 + *s - '0'; s++; }
+            }
+            for (int gi = lo; gi <= hi && gi < 64; gi++)
+              gpu_device_allowed[gi] = 1;
+          }
+          fprintf(stderr, "GPU device filter: %s\n", optarg);
+        }
         break;
 #endif
 
@@ -41823,9 +41980,18 @@ usage:
 
   Curfile = "<Unknown>";
   LowSkip = Lowline = 0;
+#ifdef GPU_ENABLED
+  {
+    int gpu_avail = 0;
 #if defined(__APPLE__) && defined(METAL_GPU)
-  if (metal_md5salt_available())
-    gpujob_init(maxt + 16);
+    gpu_avail = metal_md5salt_available();
+#elif defined(CUDA_GPU)
+    gpu_avail = cuda_md5salt_available();
+#elif defined(OPENCL_GPU)
+    gpu_avail = opencl_md5salt_available();
+#endif
+    if (gpu_avail) gpujob_init(maxt + 16);
+  }
 #endif
   launch(ReportStats, NULL);
   for (y = 0; y < argc; y++) {
@@ -41980,7 +42146,7 @@ reprocess:
     possess(HashWaiting);
     twist(HashWaiting, TO, 1);
 
-#if defined(__APPLE__) && defined(METAL_GPU)
+#ifdef GPU_ENABLED
     gpujob_shutdown(); /* must be before join_all — gpujob needs JOB_DONE to exit */
 #endif
     x = join_all();

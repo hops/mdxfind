@@ -9,7 +9,7 @@
 #ifndef GPUJOB_H
 #define GPUJOB_H
 
-#if defined(__APPLE__) && defined(METAL_GPU)
+#if (defined(__APPLE__) && defined(METAL_GPU)) || defined(CUDA_GPU) || defined(OPENCL_GPU)
 
 #include <stdint.h>
 
@@ -45,6 +45,7 @@ struct jobg {
     char        *filename;
     int          flags;
     int         *doneprint;
+    unsigned int line_num;              /* starting line number for priority ordering */
 };
 
 /* Initialize GPU work queue, allocate JOBG structs, launch gpujob thread.
@@ -69,5 +70,5 @@ int gpujob_available(void);
 }
 #endif
 
-#endif /* __APPLE__ && METAL_GPU */
+#endif /* (__APPLE__ && METAL_GPU) || CUDA_GPU || OPENCL_GPU */
 #endif /* GPUJOB_H */

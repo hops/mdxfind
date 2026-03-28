@@ -26,6 +26,10 @@ Uses [yarn.c](https://github.com/madler/pigz) for threading, [libJudy](https://j
 - Distributed cracking clusters — hashcat + hashtopolis is better suited
 - Single known hash type with a small hash list — hashcat's GPU speed wins here
 
+### GPU acceleration
+
+mdxfind supports OpenCL GPU acceleration for salted hash types, using multiple GPUs simultaneously across AMD and NVIDIA hardware. On a 5-GPU system (2x AMD RDNA3 + RTX 4070 Ti + RTX 3080 + AMD iGPU), mdxfind solved 1,000,000 salted MD5 hashes against the rockyou wordlist in 40 seconds at 69 GH/s. See [docs/BENCHMARK.md](docs/BENCHMARK.md) for detailed GPU performance comparisons.
+
 ### Antivirus note
 
 Some antivirus vendors occasionally flag mdxfind as a coin miner due to its hashing features. This is a false positive — mdxfind does not mine cryptocurrency.
@@ -143,6 +147,14 @@ mdxfind -f hashfile [options] [wordlist ...]
 | `-v` | Do not mark salts as found (continue searching all salts) |
 | `-w N` | Skip N lines from first wordlist |
 | `-y` | Enable directory recursion for wordlists |
+
+**GPU acceleration:**
+
+| Option | Description |
+|--------|-------------|
+| `-G list` | List available GPU devices and exit |
+| `-G 0,2,4` | Use only the specified GPU devices (comma-separated indices or ranges like `0-2,5`) |
+| `-G none` | Disable GPU acceleration entirely |
 
 **Output and control:**
 
