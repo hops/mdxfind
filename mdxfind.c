@@ -162,11 +162,15 @@ int Neon;
 #define mysha1 SHA1
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.238 2026/03/28 13:34:48 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.239 2026/03/29 03:05:31 dlr Exp dlr $";
 /*
  * $Log: mdxfind.c,v $
+ * Revision 1.239  2026/03/29 03:05:31  dlr
+ * OpenCL: support up to 64 GPU devices. 12x RTX 4090: 328 GH/s, 14s wall time.
+ *
  * Revision 1.238  2026/03/28 13:34:48  dlr
  * Pass job->filename and job->startline to gpujob_get_free for GPU priority scheduling.
+ * OpenCL: support up to 64 GPU devices.
  *
  * Revision 1.237  2026/03/28 11:09:56  dlr
  * GPU: fix -G filter to parse device list immediately (optarg is transient).

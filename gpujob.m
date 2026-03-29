@@ -62,9 +62,77 @@ struct jobg *GPUWorkHead, **GPUWorkTail;
 struct jobg *GPUFreeHead, **GPUFreeTail;
 lock *GPUWorkWaiting, *GPUFreeWaiting;
 static int _gpujob_ready = 0;
+static int _num_jobg_buffers = 0;
 static int _max_salt_count = 0;
 static int _max_salt_bytes = 0;
 static int overflow_loaded = 0;
+
+/* ---- GPU scheduling — priority buffer allocation ---- */
+struct gpu_waiter {
+    struct gpu_waiter *next;
+    char *filename;
+    unsigned int startline;
+    lock *wake;
+};
+
+static lock *GPUSchedLock;
+static char *gpu_sched_filename = NULL;
+static unsigned int gpu_sched_curline = 0;
+static int gpu_sched_active = 0;
+static struct gpu_waiter *gpu_waiter_head = NULL;
+static struct gpu_waiter *gpu_waiter_pool = NULL;
+static int gpu_sched_active_count = 0;
+
+static void gpu_sched_wake_best(void) {
+    /* Called with GPUSchedLock possessed */
+    if (!gpu_waiter_head) return;
+
+    struct gpu_waiter *best = NULL;
+    struct gpu_waiter **best_pp = NULL;
+
+    /* Priority 1: same filename, lower-or-equal line number */
+    if (gpu_sched_active) {
+        struct gpu_waiter **pp = &gpu_waiter_head;
+        while (*pp) {
+            struct gpu_waiter *w = *pp;
+            if (w->filename == gpu_sched_filename &&
+                w->startline <= gpu_sched_curline) {
+                if (!best || w->startline < best->startline) {
+                    best = w;
+                    best_pp = pp;
+                }
+            }
+            pp = &w->next;
+        }
+    }
+
+    /* Priority 2: no eligible waiter — force-wake lowest to prevent deadlock */
+    if (!best && gpu_waiter_head && gpu_sched_active_count == 0) {
+        struct gpu_waiter **pp = &gpu_waiter_head;
+        while (*pp) {
+            struct gpu_waiter *w = *pp;
+            if (!best ||
+                (uintptr_t)w->filename < (uintptr_t)best->filename ||
+                (w->filename == best->filename &&
+                 w->startline < best->startline)) {
+                best = w;
+                best_pp = pp;
+            }
+            pp = &w->next;
+        }
+    }
+
+    if (best) {
+        *best_pp = best->next;
+        best->next = NULL;
+        gpu_sched_filename = best->filename;
+        gpu_sched_curline = best->startline;
+        gpu_sched_active = 1;
+        gpu_sched_active_count++;
+        possess(best->wake);
+        twist(best->wake, TO, 1);
+    }
+}
 
 #ifdef GPU_DOUBLE_BUFFER
 static int _gpujob_count = 2;
@@ -79,13 +147,15 @@ static int _gpujob_count = 1;
  * Writes into caller-provided buffers (pre-allocated at max size).
  * Returns number of packed salts. */
 static int gpu_pack_salts(struct saltentry *saltsnap, int nsalts,
-                          char *salts_packed, uint32_t *soff, uint16_t *slen) {
+                          char *salts_packed, uint32_t *soff, uint16_t *slen,
+                          int *pack_map) {
     int packed = 0;
     uint32_t gsp = 0;
     for (int i = 0; i < nsalts; i++) {
         if (!Printall && *saltsnap[i].PV == 0) continue;
         soff[packed] = gsp;
         slen[packed] = saltsnap[i].saltlen;
+        pack_map[packed] = i;
         memcpy(salts_packed + gsp, saltsnap[i].salt, saltsnap[i].saltlen);
         gsp += saltsnap[i].saltlen;
         packed++;
@@ -154,9 +224,11 @@ void gpujob(void *arg) {
     char *salts_packed = (char *)malloc(_max_salt_bytes + 4096);
     uint32_t *soff = (uint32_t *)malloc(_max_salt_count * sizeof(uint32_t));
     uint16_t *slen = (uint16_t *)malloc(_max_salt_count * sizeof(uint16_t));
+    int *pack_map = (int *)malloc(_max_salt_count * sizeof(int));
     int nsalts = 0;
     int nsalts_packed = 0;
     int current_op = -1;
+    int batch_count = 0;
 
     while (1) {
         /* Dequeue a JOBG */
@@ -188,22 +260,27 @@ void gpujob(void *arg) {
                 load_overflow();
         }
 
-        /* Rebuild salt snapshot on op type change (thread-local, no lock needed) */
-        if (g->op != current_op && Typesalt[g->op]) {
-            current_op = g->op;
-            metal_md5salt_set_op(g->op);
+        /* Rebuild salt snapshot on op change or periodically to pick up PV changes */
+        batch_count++;
+        if (g->op != current_op || (batch_count >= 100 && nsalts_packed > 0)) {
+            if (g->op != current_op) {
+                current_op = g->op;
+                metal_md5salt_set_op(g->op);
+            }
+            batch_count = 0;
             tsalt[0] = 0;
             nsalts = build_salt_snapshot(saltsnap, saltpool,
                             Typesalt[g->op], tsalt, Printall);
             if (nsalts > 0)
                 nsalts_packed = gpu_pack_salts(saltsnap, nsalts,
-                                               salts_packed, soff, slen);
+                                               salts_packed, soff, slen, pack_map);
             else
                 nsalts_packed = 0;
 #ifndef GPU_DOUBLE_BUFFER
-            /* Single-thread: upload salts to shared GPU buffers */
             if (nsalts_packed > 0)
                 metal_md5salt_set_salts(salts_packed, soff, slen, nsalts_packed);
+            else
+                Typedone[g->op] = 1;
 #endif
         }
 
@@ -267,15 +344,16 @@ void gpujob(void *arg) {
                 synthetic_job.pass = synthetic_job.line;
                 synthetic_job.Ruleindex = g->ruleindex[widx];
 
-                char *s1 = saltsnap[sidx].salt;
-                int saltlen = saltsnap[sidx].saltlen;
+                int snap_idx = pack_map[sidx];
+                char *s1 = saltsnap[snap_idx].salt;
+                int saltlen = saltsnap[snap_idx].saltlen;
 
                 if (iter_num <= 1) {
                     if (checkhashkey(&curin, 32, s1, &synthetic_job))
-                        PV_DEC(saltsnap[sidx].PV);
+                        PV_DEC(saltsnap[snap_idx].PV);
                 } else {
                     if (checkhashsalt(&curin, 32, s1, saltlen, iter_num, &synthetic_job))
-                        PV_DEC(saltsnap[sidx].PV);
+                        PV_DEC(saltsnap[snap_idx].PV);
                 }
             }
         }
@@ -328,6 +406,7 @@ return_jobg:
     free(salts_packed);
     free(soff);
     free(slen);
+    free(pack_map);
 }
 
 /* ---- Public API ---- */
@@ -353,9 +432,20 @@ int gpujob_init(int num_jobg) {
     if (metal_md5salt_init_slots(_max_salt_count, _max_salt_bytes) != 0) return -1;
 #endif
 
+    _num_jobg_buffers = num_jobg;
     GPUWorkWaiting = new_lock(0);
     GPUFreeWaiting = new_lock(num_jobg);
     GPUWorkTail = &GPUWorkHead;
+
+    /* Scheduler: pre-allocate waiter slots */
+    GPUSchedLock = new_lock(0);
+    release(GPUSchedLock);
+    for (int i = 0; i < num_jobg; i++) {
+        struct gpu_waiter *w = (struct gpu_waiter *)calloc(1, sizeof(*w));
+        w->wake = new_lock(0);
+        w->next = gpu_waiter_pool;
+        gpu_waiter_pool = w;
+    }
 
     for (int i = 0; i < num_jobg; i++) {
         struct jobg *g = (struct jobg *)calloc(1, sizeof(struct jobg));
@@ -380,18 +470,61 @@ int gpujob_init(int num_jobg) {
 void gpujob_shutdown(void) {
     if (!_gpujob_ready) return;
 
+    /* Wait for GPU work queue to drain */
+    possess(GPUFreeWaiting);
+    wait_for(GPUFreeWaiting, TO_BE, _num_jobg_buffers);
+    release(GPUFreeWaiting);
+
     for (int i = 0; i < _gpujob_count; i++) {
         struct jobg *sentinel = gpujob_get_free(NULL, 0);
         sentinel->op = 2000;
         sentinel->count = 0;
+        sentinel->line_num = 0;
         gpujob_submit(sentinel);
     }
-
     _gpujob_ready = 0;
 }
 
 struct jobg *gpujob_get_free(char *filename, unsigned int startline) {
-    (void)filename; (void)startline; /* scheduling not yet implemented for Metal */
+    /* NULL filename = shutdown sentinel, skip scheduling */
+    if (!filename) goto get_buffer;
+
+    possess(GPUSchedLock);
+
+    if (!gpu_sched_active) {
+        gpu_sched_filename = filename;
+        gpu_sched_curline = startline;
+        gpu_sched_active = 1;
+        gpu_sched_active_count++;
+        release(GPUSchedLock);
+    } else if (filename == gpu_sched_filename && startline <= gpu_sched_curline) {
+        if (startline < gpu_sched_curline)
+            gpu_sched_curline = startline;
+        gpu_sched_active_count++;
+        release(GPUSchedLock);
+    } else {
+        struct gpu_waiter *w = gpu_waiter_pool;
+        if (w) gpu_waiter_pool = w->next;
+        else w = (struct gpu_waiter *)calloc(1, sizeof(*w));
+        if (!w->wake) w->wake = new_lock(0);
+        w->filename = filename;
+        w->startline = startline;
+        w->next = gpu_waiter_head;
+        gpu_waiter_head = w;
+        lock *my_wake = w->wake;
+        release(GPUSchedLock);
+
+        possess(my_wake);
+        wait_for(my_wake, TO_BE, 1);
+        twist(my_wake, TO, 0);
+
+        possess(GPUSchedLock);
+        w->next = gpu_waiter_pool;
+        gpu_waiter_pool = w;
+        release(GPUSchedLock);
+    }
+
+get_buffer:
     possess(GPUFreeWaiting);
     wait_for(GPUFreeWaiting, NOT_TO_BE, 0);
     struct jobg *g = GPUFreeHead;
@@ -411,6 +544,11 @@ void gpujob_submit(struct jobg *g) {
     *GPUWorkTail = g;
     GPUWorkTail = &(g->next);
     twist(GPUWorkWaiting, BY, +1);
+
+    possess(GPUSchedLock);
+    gpu_sched_active_count--;
+    gpu_sched_wake_best();
+    release(GPUSchedLock);
 }
 
 int gpujob_available(void) {

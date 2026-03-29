@@ -17,7 +17,7 @@
 #include "opencl_md5salt.h"
 
 /* ---- Multi-GPU device state ---- */
-#define MAX_GPU_DEVICES 8
+#define MAX_GPU_DEVICES 64
 
 struct gpu_device {
     cl_context       ctx;
@@ -487,9 +487,9 @@ void opencl_md5salt_list_devices(void) {
     }
     int idx = 0;
     for (cl_uint p = 0; p < nplat; p++) {
-        cl_device_id devs[MAX_GPU_DEVICES];
+        cl_device_id devs[64];
         cl_uint ndev = 0;
-        err = clGetDeviceIDs(plats[p], CL_DEVICE_TYPE_GPU, MAX_GPU_DEVICES, devs, &ndev);
+        err = clGetDeviceIDs(plats[p], CL_DEVICE_TYPE_GPU, 64, devs, &ndev);
         if (err != CL_SUCCESS || ndev == 0) continue;
         for (cl_uint d = 0; d < ndev; d++) {
             char dname[256];
@@ -611,9 +611,9 @@ int opencl_md5salt_init(void) {
 
     num_gpu_devs = 0;
     for (cl_uint p = 0; p < nplat; p++) {
-        cl_device_id devs[MAX_GPU_DEVICES];
+        cl_device_id devs[64];
         cl_uint ndev = 0;
-        err = clGetDeviceIDs(plats[p], CL_DEVICE_TYPE_GPU, MAX_GPU_DEVICES,
+        err = clGetDeviceIDs(plats[p], CL_DEVICE_TYPE_GPU, 64,
                              devs, &ndev);
         if (err != CL_SUCCESS || ndev == 0) continue;
 
