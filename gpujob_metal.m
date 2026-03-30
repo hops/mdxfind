@@ -9,7 +9,7 @@
  * see mdxfind.c lines 8136-8149), reused for every job.
  *
  * Define GPU_DOUBLE_BUFFER to enable experimental dual-thread double-buffered
- * dispatch via per-slot GPU buffers (metal_md5salt_submit_slot/wait_slot).
+ * dispatch via per-slot GPU buffers (gpu_metal_submit_slot/wait_slot).
  * Currently disabled: M1 GPU saturates at 302M threads and back-to-back
  * dispatches from two slots cause super-linear slowdown.
  */
@@ -25,7 +25,7 @@
 #include "mdxfind.h"
 #include "job_types.h"
 #include "gpujob.h"
-#include "metal_md5salt.h"
+#include "gpu_metal.h"
 
 extern "C" {
 #include "yarn.h"
@@ -107,20 +107,17 @@ static void gpu_sched_wake_best(void) {
         }
     }
 
-    /* Priority 2: no eligible waiter — force-wake lowest to prevent deadlock */
+    /* Priority 2: no active threads — wake ALL waiters to prevent deadlock */
     if (!best && gpu_waiter_head && gpu_sched_active_count == 0) {
-        struct gpu_waiter **pp = &gpu_waiter_head;
-        while (*pp) {
-            struct gpu_waiter *w = *pp;
-            if (!best ||
-                (uintptr_t)w->filename < (uintptr_t)best->filename ||
-                (w->filename == best->filename &&
-                 w->startline < best->startline)) {
-                best = w;
-                best_pp = pp;
-            }
-            pp = &w->next;
+        while (gpu_waiter_head) {
+            struct gpu_waiter *w = gpu_waiter_head;
+            gpu_waiter_head = w->next;
+            w->next = NULL;
+            gpu_sched_active_count++;
+            possess(w->wake);
+            twist(w->wake, TO, 1);
         }
+        return;
     }
 
     if (best) {
@@ -201,7 +198,7 @@ static void load_overflow(void) {
             }
             OPV = (Word_t *)JudyLNext(OverflowHash, &okey, NULL);
         }
-        metal_md5salt_set_overflow(okeys, ohashes, ooffsets, olengths, ocnt);
+        gpu_metal_set_overflow(okeys, ohashes, ooffsets, olengths, ocnt);
         free(okeys); free(ohashes); free(ooffsets); free(olengths);
     }
 }
@@ -266,7 +263,7 @@ void gpujob(void *arg) {
         if (g->op != current_op || (batch_count >= 100 && nsalts_packed > 0)) {
             if (g->op != current_op) {
                 current_op = g->op;
-                metal_md5salt_set_op(g->op);
+                gpu_metal_set_op(g->op);
             }
             batch_count = 0;
             tsalt[0] = 0;
@@ -279,7 +276,7 @@ void gpujob(void *arg) {
                 nsalts_packed = 0;
 #ifndef GPU_DOUBLE_BUFFER
             if (nsalts_packed > 0)
-                metal_md5salt_set_salts(salts_packed, soff, slen, nsalts_packed);
+                gpu_metal_set_salts(salts_packed, soff, slen, nsalts_packed);
             else
                 Typedone[g->op] = 1;
 #endif
@@ -300,14 +297,14 @@ void gpujob(void *arg) {
 
 #ifdef GPU_DOUBLE_BUFFER
         /* Double-buffer: submit to our slot with per-slot salt+word buffers */
-        metal_md5salt_submit_slot(my_slot,
+        gpu_metal_submit_slot(my_slot,
             g->hexhash[0], (const uint16_t *)g->hexlen, g->count,
             salts_packed, soff, slen, nsalts_packed);
-        hits = metal_md5salt_wait_slot(my_slot, &nhits);
+        hits = gpu_metal_wait_slot(my_slot, &nhits);
         fprintf(stderr, "gpu[%d]: %d words -> %d hits\n", my_slot, g->count, nhits);
 #else
         /* Single-thread: use shared dispatch_batch */
-        hits = metal_md5salt_dispatch_batch(
+        hits = gpu_metal_dispatch_batch(
             g->hexhash[0], (const uint16_t *)g->hexlen,
             g->count, &nhits);
 #endif
@@ -349,10 +346,7 @@ void gpujob(void *arg) {
                 char *s1 = saltsnap[snap_idx].salt;
                 int saltlen = saltsnap[snap_idx].saltlen;
 
-                if (iter_num <= 1) {
-                    if (checkhashkey(&curin, 32, s1, &synthetic_job))
-                        PV_DEC(saltsnap[snap_idx].PV);
-                } else {
+                {
                     if (checkhashsalt(&curin, 32, s1, saltlen, iter_num, &synthetic_job))
                         PV_DEC(saltsnap[snap_idx].PV);
                 }
@@ -413,7 +407,7 @@ return_jobg:
 /* ---- Public API ---- */
 
 int gpujob_init(int num_jobg) {
-    if (!metal_md5salt_available()) return -1;
+    if (!gpu_metal_available()) return -1;
 
     /* Scan Typesaltcnt/Typesaltbytes for max sizes (procjob pattern) */
     _max_salt_count = 0;
@@ -427,10 +421,10 @@ int gpujob_init(int num_jobg) {
     if (_max_salt_count < 1024) _max_salt_count = 1024;
     if (_max_salt_bytes < 8192) _max_salt_bytes = 8192;
 
-    metal_md5salt_set_max_iter(Maxiter);
+    gpu_metal_set_max_iter(Maxiter);
 
 #ifdef GPU_DOUBLE_BUFFER
-    if (metal_md5salt_init_slots(_max_salt_count, _max_salt_bytes) != 0) return -1;
+    if (gpu_metal_init_slots(_max_salt_count, _max_salt_bytes) != 0) return -1;
 #endif
 
     _num_jobg_buffers = num_jobg;
@@ -471,6 +465,19 @@ int gpujob_init(int num_jobg) {
 void gpujob_shutdown(void) {
     if (!_gpujob_ready) return;
 
+    /* Wake all threads blocked in the priority scheduler */
+    possess(GPUSchedLock);
+    gpu_sched_active = 0;
+    while (gpu_waiter_head) {
+        struct gpu_waiter *w = gpu_waiter_head;
+        gpu_waiter_head = w->next;
+        w->next = NULL;
+        gpu_sched_active_count++;
+        possess(w->wake);
+        twist(w->wake, TO, 1);
+    }
+    release(GPUSchedLock);
+
     /* Wait for GPU work queue to drain */
     possess(GPUFreeWaiting);
     wait_for(GPUFreeWaiting, TO_BE, _num_jobg_buffers);
@@ -501,6 +508,10 @@ struct jobg *gpujob_get_free(char *filename, unsigned int startline) {
     } else if (filename == gpu_sched_filename && startline <= gpu_sched_curline) {
         if (startline < gpu_sched_curline)
             gpu_sched_curline = startline;
+        gpu_sched_active_count++;
+        release(GPUSchedLock);
+    } else if (filename == gpu_sched_filename) {
+        /* Same file, higher line — grant without blocking */
         gpu_sched_active_count++;
         release(GPUSchedLock);
     } else {
@@ -556,6 +567,10 @@ int gpujob_available(void) {
     return _gpujob_ready;
 }
 
+int gpujob_batch_max(void) {
+    return GPUBATCH_MAX;
+}
+
 int gpu_op_category(int op) {
     switch (op) {
     case JOB_MD5SALT:
@@ -563,6 +578,9 @@ int gpu_op_category(int op) {
     case JOB_MD5revMD5SALT:
     case JOB_MD5sub8_24SALT:
         return GPU_CAT_SALTED;
+    case JOB_MD5SALTPASS:
+    case JOB_MD5PASSSALT:
+        return GPU_CAT_SALTPASS;
     /* Bare MD5 iterated -- disabled pending larger batch sizes
     case JOB_MD5:
     case JOB_MD5UC:

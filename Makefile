@@ -91,7 +91,7 @@ endif
 
 # Metal GPU objects (macOS only)
 ifdef METAL_GPU
-  MDXFIND_OBJS += metal_md5salt.o gpujob.o
+  MDXFIND_OBJS += gpu_metal.o gpujob_metal.o
 endif
 
 # OpenCL GPU objects (Linux, FreeBSD, aarch64)
@@ -155,14 +155,14 @@ sha1_shani.o: sha1_shani.c
 
 # Metal GPU source files (Objective-C++)
 ifdef METAL_GPU
-metal_md5salt.o: metal_md5salt.m metal_md5salt.h gpujob.h
-	$(CC) -x objective-c++ $(CFLAGS) -std=c++11 -c metal_md5salt.m
+gpu_metal.o: gpu_metal.m gpu_metal.h gpujob.h
+	$(CC) -x objective-c++ $(CFLAGS) -std=c++11 -c gpu_metal.m
 
-gpujob.o: gpujob.m gpujob.h job_types.h metal_md5salt.h mdxfind.h
+gpujob_metal.o: gpujob_metal.m gpujob.h job_types.h gpu_metal.h mdxfind.h
 ifeq ($(UNAME_M),x86_64)
-	$(CC) -x objective-c++ $(CFLAGS) -std=c++11 -include emmintrin.h -c gpujob.m
+	$(CC) -x objective-c++ $(CFLAGS) -std=c++11 -include emmintrin.h -c gpujob_metal.m
 else
-	$(CC) -x objective-c++ $(CFLAGS) -std=c++11 -c gpujob.m
+	$(CC) -x objective-c++ $(CFLAGS) -std=c++11 -c gpujob_metal.m
 endif
 endif
 

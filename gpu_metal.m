@@ -2,14 +2,15 @@
  * metal_md5salt.m — Apple Metal GPU acceleration for MD5SALT (E31)
  *
  * Thin Objective-C wrapper around Metal compute pipeline.
- * Exports a pure C interface defined in metal_md5salt.h.
+ * Exports a pure C interface defined in gpu_metal.h.
  */
 
 #if defined(__APPLE__) && defined(METAL_GPU)
 
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
-#include "metal_md5salt.h"
+#include "gpu_metal.h"
+#include "job_types.h"
 #include "gpujob.h"
 #include <string.h>
 #include <stdio.h>
@@ -18,11 +19,24 @@
 /* ---- Metal state ---- */
 static id<MTLDevice>              mtl_device;
 static id<MTLCommandQueue>        mtl_queue;
-static id<MTLComputePipelineState> mtl_pipeline;
-static id<MTLComputePipelineState> mtl_pipeline_salts; /* salts-only kernel */
-static id<MTLComputePipelineState> mtl_pipeline_batch; /* batch pre-hashed kernel */
-static id<MTLComputePipelineState> mtl_pipeline_iter;  /* iterating batch kernel */
-static id<MTLComputePipelineState> mtl_pipeline_sub8;  /* sub8-24 batch kernel */
+static id<MTLComputePipelineState> mtl_pipeline;       /* probe kernel */
+static id<MTLComputePipelineState> mtl_pipeline_salts;  /* salts-only kernel */
+static id<MTLComputePipelineState> mtl_pipeline_iter;   /* salted iteration override */
+static id<MTLComputePipelineState> mtl_pipelines[JOB_DONE]; /* per-op dispatch kernels */
+
+/* Metal kernel-to-op mapping table (mirrors OpenCL kernel_map) */
+static const struct {
+    const char *name;
+    int ops[8];
+} metal_kernel_map[] = {
+    {"md5salt_batch_prehashed", {JOB_MD5SALT, JOB_MD5UCSALT, JOB_MD5revMD5SALT, -1}},
+    {"md5salt_batch_sub8_24",   {JOB_MD5sub8_24SALT, -1}},
+    {"md5salt_batch_iter",      {-1}},  /* special: salted iteration override */
+    {"md5saltpass_batch",       {JOB_MD5SALTPASS, -1}},
+    {"md5passsalt_batch",       {JOB_MD5PASSSALT, -1}},
+    {NULL, {-1}}
+};
+#define MTL_KERN_ITER_IDX 2
 static int                        mtl_ready = 0;
 
 /* ---- Compact table GPU buffers (zero-copy where possible) ---- */
@@ -1082,6 +1096,359 @@ kernel void md5salt_batch_sub8_24(
         }
     }
 }
+
+/* ---- MD5(salt + password) kernel ---- */
+kernel void md5saltpass_batch(
+    device const uint8_t    *hexhashes   [[buffer(0)]],
+    device const ushort     *hex_lens    [[buffer(1)]],
+    device const ushort     *unused2     [[buffer(2)]],
+    device const uint8_t    *salts       [[buffer(3)]],
+    device const uint       *salt_offsets [[buffer(4)]],
+    device const ushort     *salt_lens   [[buffer(5)]],
+    device const uint       *compact_fp  [[buffer(6)]],
+    device const uint       *compact_idx [[buffer(7)]],
+    constant MetalParams    &params      [[buffer(8)]],
+    device const uint8_t    *hash_data_buf [[buffer(9)]],
+    device const uint64_t   *hash_data_off [[buffer(10)]],
+    device const ushort     *hash_data_len [[buffer(11)]],
+    device uint             *hits         [[buffer(12)]],
+    device atomic_uint      *hit_count    [[buffer(13)]],
+    device const uint64_t   *overflow_keys   [[buffer(14)]],
+    device const uint8_t    *overflow_hashes [[buffer(15)]],
+    device const uint       *overflow_offsets [[buffer(16)]],
+    device const ushort     *overflow_lengths [[buffer(17)]],
+    uint                     tid          [[thread_position_in_grid]],
+    uint                     lid          [[thread_position_in_threadgroup]],
+    uint                     tgsize       [[threads_per_threadgroup]])
+{
+    uint word_idx = tid / params.num_salts;
+    uint salt_idx = tid % params.num_salts;
+    if (word_idx >= params.num_words) return;
+
+    int plen = hex_lens[word_idx];
+    device const uint8_t *pass = hexhashes + word_idx * 256;
+    uint soff = salt_offsets[salt_idx];
+    int slen = salt_lens[salt_idx];
+    int total_len = slen + plen;
+
+    uint M[16];
+    for (int i = 0; i < 16; i++) M[i] = 0;
+
+    uint hx = 0x67452301, hy = 0xEFCDAB89, hz = 0x98BADCFE, hw = 0x10325476;
+
+    if (total_len <= 55) {
+        for (int i = 0; i < slen; i++)
+            M[i >> 2] |= ((uint)salts[soff + i]) << ((i & 3) << 3);
+        for (int i = 0; i < plen; i++) {
+            int pos = slen + i;
+            M[pos >> 2] |= ((uint)pass[i]) << ((pos & 3) << 3);
+        }
+        M[total_len >> 2] |= 0x80u << ((total_len & 3) << 3);
+        M[14] = total_len * 8;
+        for (int i = 0; i < 64; i++) {
+            uint f, g;
+            if (i < 16)      { f = (hy & hz) | (~hy & hw); g = i; }
+            else if (i < 32) { f = (hw & hy) | (~hw & hz); g = (5*i+1) & 15; }
+            else if (i < 48) { f = hy ^ hz ^ hw;            g = (3*i+5) & 15; }
+            else              { f = hz ^ (~hw | hy);         g = (7*i)   & 15; }
+            f = f + hx + K[i] + M[g];
+            hx = hw; hw = hz; hz = hy;
+            hy = hy + ((f << S[i]) | (f >> (32 - S[i])));
+        }
+        hx += 0x67452301; hy += 0xEFCDAB89; hz += 0x98BADCFE; hw += 0x10325476;
+    } else {
+        /* Two blocks */
+        /* Fill first 64 bytes from salt+pass */
+        int salt_b1 = (slen < 64) ? slen : 64;
+        for (int i = 0; i < salt_b1; i++)
+            M[i >> 2] |= ((uint)salts[soff + i]) << ((i & 3) << 3);
+        int pass_b1 = 64 - salt_b1;
+        if (pass_b1 > plen) pass_b1 = plen;
+        for (int i = 0; i < pass_b1; i++) {
+            int pos = salt_b1 + i;
+            M[pos >> 2] |= ((uint)pass[i]) << ((pos & 3) << 3);
+        }
+        if (total_len < 64)
+            M[total_len >> 2] |= 0x80u << ((total_len & 3) << 3);
+        for (int i = 0; i < 64; i++) {
+            uint f, g;
+            if (i < 16)      { f = (hy & hz) | (~hy & hw); g = i; }
+            else if (i < 32) { f = (hw & hy) | (~hw & hz); g = (5*i+1) & 15; }
+            else if (i < 48) { f = hy ^ hz ^ hw;            g = (3*i+5) & 15; }
+            else              { f = hz ^ (~hw | hy);         g = (7*i)   & 15; }
+            f = f + hx + K[i] + M[g];
+            hx = hw; hw = hz; hz = hy;
+            hy = hy + ((f << S[i]) | (f >> (32 - S[i])));
+        }
+        hx += 0x67452301; hy += 0xEFCDAB89; hz += 0x98BADCFE; hw += 0x10325476;
+        /* Second block */
+        for (int i = 0; i < 16; i++) M[i] = 0;
+        int pos2 = 0;
+        int salt_b2 = slen - salt_b1;
+        for (int i = 0; i < salt_b2; i++, pos2++)
+            M[pos2 >> 2] |= ((uint)salts[soff + salt_b1 + i]) << ((pos2 & 3) << 3);
+        int pass_b2 = plen - pass_b1;
+        for (int i = 0; i < pass_b2; i++, pos2++)
+            M[pos2 >> 2] |= ((uint)pass[pass_b1 + i]) << ((pos2 & 3) << 3);
+        if (total_len >= 64)
+            M[pos2 >> 2] |= 0x80u << ((pos2 & 3) << 3);
+        M[14] = total_len * 8;
+        uint sx = hx, sy = hy, sz = hz, sw = hw;
+        for (int i = 0; i < 64; i++) {
+            uint f, g;
+            if (i < 16)      { f = (hy & hz) | (~hy & hw); g = i; }
+            else if (i < 32) { f = (hw & hy) | (~hw & hz); g = (5*i+1) & 15; }
+            else if (i < 48) { f = hy ^ hz ^ hw;            g = (3*i+5) & 15; }
+            else              { f = hz ^ (~hw | hy);         g = (7*i)   & 15; }
+            f = f + hx + K[i] + M[g];
+            hx = hw; hw = hz; hz = hy;
+            hy = hy + ((f << S[i]) | (f >> (32 - S[i])));
+        }
+        hx += sx; hy += sy; hz += sz; hw += sw;
+    }
+
+    /* Compact table probe */
+    uint4 h = uint4(hx, hy, hz, hw);
+    ulong key = (ulong(h.y) << 32) | h.x;
+    uint fp = uint(key >> 32);
+    if (fp == 0) fp = 1;
+    ulong pos = (key ^ (key >> 32)) & params.compact_mask;
+    for (uint p = 0; p < params.max_probe; p++) {
+        uint cfp = compact_fp[pos];
+        if (cfp == 0) break;
+        if (cfp == fp) {
+            uint idx = compact_idx[pos];
+            if (idx < params.hash_data_count) {
+                ulong off = hash_data_off[idx];
+                device const uint *ref = (device const uint *)(hash_data_buf + off);
+                if (h.x == ref[0] && h.y == ref[1] && h.z == ref[2] && h.w == ref[3]) {
+                    uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
+                    if (slot < params.max_hits) {
+                        uint base = slot * 6;
+                        hits[base] = word_idx; hits[base+1] = salt_idx;
+                        hits[base+2] = h.x; hits[base+3] = h.y;
+                        hits[base+4] = h.z; hits[base+5] = h.w;
+                    }
+                    return;
+                }
+            }
+        }
+        pos = (pos + 1) & params.compact_mask;
+    }
+    /* Overflow binary search */
+    if (params.overflow_count > 0) {
+        int lo = 0, hi = int(params.overflow_count) - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2;
+            ulong mkey = overflow_keys[mid];
+            if (key < mkey) hi = mid - 1;
+            else if (key > mkey) lo = mid + 1;
+            else {
+                uint ooff = overflow_offsets[mid];
+                device const uint *oref = (device const uint *)(overflow_hashes + ooff);
+                if (h.x == oref[0] && h.y == oref[1] && h.z == oref[2] && h.w == oref[3]) {
+                    uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
+                    if (slot < params.max_hits) {
+                        uint base = slot * 6;
+                        hits[base] = word_idx; hits[base+1] = salt_idx;
+                        hits[base+2] = h.x; hits[base+3] = h.y;
+                        hits[base+4] = h.z; hits[base+5] = h.w;
+                    }
+                    return;
+                }
+                for (int d = mid-1; d >= 0 && overflow_keys[d] == key; d--) {
+                    oref = (device const uint *)(overflow_hashes + overflow_offsets[d]);
+                    if (h.x == oref[0] && h.y == oref[1] && h.z == oref[2] && h.w == oref[3]) {
+                        uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
+                        if (slot < params.max_hits) {
+                            uint base = slot * 6;
+                            hits[base] = word_idx; hits[base+1] = salt_idx;
+                            hits[base+2] = h.x; hits[base+3] = h.y;
+                            hits[base+4] = h.z; hits[base+5] = h.w;
+                        }
+                        return;
+                    }
+                }
+                for (int d = mid+1; d < int(params.overflow_count) && overflow_keys[d] == key; d++) {
+                    oref = (device const uint *)(overflow_hashes + overflow_offsets[d]);
+                    if (h.x == oref[0] && h.y == oref[1] && h.z == oref[2] && h.w == oref[3]) {
+                        uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
+                        if (slot < params.max_hits) {
+                            uint base = slot * 6;
+                            hits[base] = word_idx; hits[base+1] = salt_idx;
+                            hits[base+2] = h.x; hits[base+3] = h.y;
+                            hits[base+4] = h.z; hits[base+5] = h.w;
+                        }
+                        return;
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
+
+/* ---- MD5(password + salt) kernel ---- */
+kernel void md5passsalt_batch(
+    device const uint8_t    *hexhashes   [[buffer(0)]],
+    device const ushort     *hex_lens    [[buffer(1)]],
+    device const ushort     *unused2     [[buffer(2)]],
+    device const uint8_t    *salts       [[buffer(3)]],
+    device const uint       *salt_offsets [[buffer(4)]],
+    device const ushort     *salt_lens   [[buffer(5)]],
+    device const uint       *compact_fp  [[buffer(6)]],
+    device const uint       *compact_idx [[buffer(7)]],
+    constant MetalParams    &params      [[buffer(8)]],
+    device const uint8_t    *hash_data_buf [[buffer(9)]],
+    device const uint64_t   *hash_data_off [[buffer(10)]],
+    device const ushort     *hash_data_len [[buffer(11)]],
+    device uint             *hits         [[buffer(12)]],
+    device atomic_uint      *hit_count    [[buffer(13)]],
+    device const uint64_t   *overflow_keys   [[buffer(14)]],
+    device const uint8_t    *overflow_hashes [[buffer(15)]],
+    device const uint       *overflow_offsets [[buffer(16)]],
+    device const ushort     *overflow_lengths [[buffer(17)]],
+    uint                     tid          [[thread_position_in_grid]],
+    uint                     lid          [[thread_position_in_threadgroup]],
+    uint                     tgsize       [[threads_per_threadgroup]])
+{
+    uint word_idx = tid / params.num_salts;
+    uint salt_idx = tid % params.num_salts;
+    if (word_idx >= params.num_words) return;
+
+    int plen = hex_lens[word_idx];
+    device const uint8_t *pass = hexhashes + word_idx * 256;
+    uint soff = salt_offsets[salt_idx];
+    int slen = salt_lens[salt_idx];
+    int total_len = plen + slen;
+
+    uint M[16];
+    for (int i = 0; i < 16; i++) M[i] = 0;
+
+    uint hx = 0x67452301, hy = 0xEFCDAB89, hz = 0x98BADCFE, hw = 0x10325476;
+
+    if (total_len <= 55) {
+        for (int i = 0; i < plen; i++)
+            M[i >> 2] |= ((uint)pass[i]) << ((i & 3) << 3);
+        for (int i = 0; i < slen; i++) {
+            int pos = plen + i;
+            M[pos >> 2] |= ((uint)salts[soff + i]) << ((pos & 3) << 3);
+        }
+        M[total_len >> 2] |= 0x80u << ((total_len & 3) << 3);
+        M[14] = total_len * 8;
+        for (int i = 0; i < 64; i++) {
+            uint f, g;
+            if (i < 16)      { f = (hy & hz) | (~hy & hw); g = i; }
+            else if (i < 32) { f = (hw & hy) | (~hw & hz); g = (5*i+1) & 15; }
+            else if (i < 48) { f = hy ^ hz ^ hw;            g = (3*i+5) & 15; }
+            else              { f = hz ^ (~hw | hy);         g = (7*i)   & 15; }
+            f = f + hx + K[i] + M[g];
+            hx = hw; hw = hz; hz = hy;
+            hy = hy + ((f << S[i]) | (f >> (32 - S[i])));
+        }
+        hx += 0x67452301; hy += 0xEFCDAB89; hz += 0x98BADCFE; hw += 0x10325476;
+    } else {
+        /* Two blocks: fill first 64 bytes from pass+salt */
+        int pass_b1 = (plen < 64) ? plen : 64;
+        for (int i = 0; i < pass_b1; i++)
+            M[i >> 2] |= ((uint)pass[i]) << ((i & 3) << 3);
+        int salt_b1 = 64 - pass_b1;
+        if (salt_b1 > slen) salt_b1 = slen;
+        for (int i = 0; i < salt_b1; i++) {
+            int pos = pass_b1 + i;
+            M[pos >> 2] |= ((uint)salts[soff + i]) << ((pos & 3) << 3);
+        }
+        if (total_len < 64)
+            M[total_len >> 2] |= 0x80u << ((total_len & 3) << 3);
+        for (int i = 0; i < 64; i++) {
+            uint f, g;
+            if (i < 16)      { f = (hy & hz) | (~hy & hw); g = i; }
+            else if (i < 32) { f = (hw & hy) | (~hw & hz); g = (5*i+1) & 15; }
+            else if (i < 48) { f = hy ^ hz ^ hw;            g = (3*i+5) & 15; }
+            else              { f = hz ^ (~hw | hy);         g = (7*i)   & 15; }
+            f = f + hx + K[i] + M[g];
+            hx = hw; hw = hz; hz = hy;
+            hy = hy + ((f << S[i]) | (f >> (32 - S[i])));
+        }
+        hx += 0x67452301; hy += 0xEFCDAB89; hz += 0x98BADCFE; hw += 0x10325476;
+        /* Second block */
+        for (int i = 0; i < 16; i++) M[i] = 0;
+        int pos2 = 0;
+        int pass_b2 = plen - pass_b1;
+        for (int i = 0; i < pass_b2; i++, pos2++)
+            M[pos2 >> 2] |= ((uint)pass[pass_b1 + i]) << ((pos2 & 3) << 3);
+        int salt_b2 = slen - salt_b1;
+        for (int i = 0; i < salt_b2; i++, pos2++)
+            M[pos2 >> 2] |= ((uint)salts[soff + salt_b1 + i]) << ((pos2 & 3) << 3);
+        if (total_len >= 64)
+            M[pos2 >> 2] |= 0x80u << ((pos2 & 3) << 3);
+        M[14] = total_len * 8;
+        uint sx = hx, sy = hy, sz = hz, sw = hw;
+        for (int i = 0; i < 64; i++) {
+            uint f, g;
+            if (i < 16)      { f = (hy & hz) | (~hy & hw); g = i; }
+            else if (i < 32) { f = (hw & hy) | (~hw & hz); g = (5*i+1) & 15; }
+            else if (i < 48) { f = hy ^ hz ^ hw;            g = (3*i+5) & 15; }
+            else              { f = hz ^ (~hw | hy);         g = (7*i)   & 15; }
+            f = f + hx + K[i] + M[g];
+            hx = hw; hw = hz; hz = hy;
+            hy = hy + ((f << S[i]) | (f >> (32 - S[i])));
+        }
+        hx += sx; hy += sy; hz += sz; hw += sw;
+    }
+
+    uint4 h = uint4(hx, hy, hz, hw);
+    ulong key = (ulong(h.y) << 32) | h.x;
+    uint fp = uint(key >> 32);
+    if (fp == 0) fp = 1;
+    ulong pos = (key ^ (key >> 32)) & params.compact_mask;
+    for (uint p = 0; p < params.max_probe; p++) {
+        uint cfp = compact_fp[pos];
+        if (cfp == 0) break;
+        if (cfp == fp) {
+            uint idx = compact_idx[pos];
+            if (idx < params.hash_data_count) {
+                ulong off = hash_data_off[idx];
+                device const uint *ref = (device const uint *)(hash_data_buf + off);
+                if (h.x == ref[0] && h.y == ref[1] && h.z == ref[2] && h.w == ref[3]) {
+                    uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
+                    if (slot < params.max_hits) {
+                        uint base = slot * 6;
+                        hits[base] = word_idx; hits[base+1] = salt_idx;
+                        hits[base+2] = h.x; hits[base+3] = h.y;
+                        hits[base+4] = h.z; hits[base+5] = h.w;
+                    }
+                    return;
+                }
+            }
+        }
+        pos = (pos + 1) & params.compact_mask;
+    }
+    if (params.overflow_count > 0) {
+        int lo = 0, hi = int(params.overflow_count) - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2;
+            ulong mkey = overflow_keys[mid];
+            if (key < mkey) hi = mid - 1;
+            else if (key > mkey) lo = mid + 1;
+            else {
+                uint ooff = overflow_offsets[mid];
+                device const uint *oref = (device const uint *)(overflow_hashes + ooff);
+                if (h.x == oref[0] && h.y == oref[1] && h.z == oref[2] && h.w == oref[3]) {
+                    uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
+                    if (slot < params.max_hits) {
+                        uint base = slot * 6;
+                        hits[base] = word_idx; hits[base+1] = salt_idx;
+                        hits[base+2] = h.x; hits[base+3] = h.y;
+                        hits[base+4] = h.z; hits[base+5] = h.w;
+                    }
+                    return;
+                }
+                break;
+            }
+        }
+    }
+}
 )MSL";
 
 /* ---- Helper: wrap buffer with zero-copy if page-aligned, else copy ---- */
@@ -1093,7 +1460,7 @@ static id<MTLBuffer> wrap_buffer(void *ptr, size_t size) {
 
 /* ---- Public API ---- */
 
-int metal_md5salt_init(void) {
+int gpu_metal_init(void) {
     @autoreleasepool {
         mtl_device = MTLCreateSystemDefaultDevice();
         if (!mtl_device) {
@@ -1148,19 +1515,19 @@ int metal_md5salt_init(void) {
             mtl_pipeline_salts = [mtl_device newComputePipelineStateWithFunction:func2 error:&error];
         }
 
-        id<MTLFunction> func3 = [lib newFunctionWithName:@"md5salt_batch_prehashed"];
-        if (func3) {
-            mtl_pipeline_batch = [mtl_device newComputePipelineStateWithFunction:func3 error:&error];
-        }
-
-        id<MTLFunction> func4 = [lib newFunctionWithName:@"md5salt_batch_iter"];
-        if (func4) {
-            mtl_pipeline_iter = [mtl_device newComputePipelineStateWithFunction:func4 error:&error];
-        }
-
-        id<MTLFunction> func5 = [lib newFunctionWithName:@"md5salt_batch_sub8_24"];
-        if (func5) {
-            mtl_pipeline_sub8 = [mtl_device newComputePipelineStateWithFunction:func5 error:&error];
+        /* Create per-op pipelines from metal_kernel_map table */
+        memset(mtl_pipelines, 0, sizeof(mtl_pipelines));
+        mtl_pipeline_iter = nil;
+        for (int k = 0; metal_kernel_map[k].name; k++) {
+            NSString *fname = [NSString stringWithUTF8String:metal_kernel_map[k].name];
+            id<MTLFunction> fn = [lib newFunctionWithName:fname];
+            if (!fn) continue;
+            id<MTLComputePipelineState> ps = [mtl_device newComputePipelineStateWithFunction:fn error:&error];
+            if (!ps) continue;
+            if (k == MTL_KERN_ITER_IDX)
+                mtl_pipeline_iter = ps;
+            for (int j = 0; metal_kernel_map[k].ops[j] >= 0; j++)
+                mtl_pipelines[metal_kernel_map[k].ops[j]] = ps;
         }
 
         /* Allocate persistent hit buffers */
@@ -1190,7 +1557,7 @@ int metal_md5salt_init(void) {
     }
 }
 
-void metal_md5salt_shutdown(void) {
+void gpu_metal_shutdown(void) {
     @autoreleasepool {
         buf_compact_fp = nil;
         buf_compact_idx = nil;
@@ -1206,11 +1573,11 @@ void metal_md5salt_shutdown(void) {
     }
 }
 
-int metal_md5salt_available(void) {
+int gpu_metal_available(void) {
     return mtl_ready;
 }
 
-int metal_md5salt_set_compact_table(
+int gpu_metal_set_compact_table(
     uint32_t *compact_fp,
     uint32_t *compact_idx,
     uint64_t compact_size,
@@ -1251,7 +1618,7 @@ int metal_md5salt_set_compact_table(
     }
 }
 
-int metal_md5salt_set_salts(
+int gpu_metal_set_salts(
     const char *salts,
     const uint32_t *salt_offsets,
     const uint16_t *salt_lens,
@@ -1297,7 +1664,7 @@ int metal_md5salt_set_salts(
     }
 }
 
-uint32_t *metal_md5salt_probe_salts(
+uint32_t *gpu_metal_probe_salts(
     const char *hexhash,
     int hexlen,
     int *nhits_out)
@@ -1364,7 +1731,7 @@ uint32_t *metal_md5salt_probe_salts(
     }
 }
 
-int metal_md5salt_set_overflow(
+int gpu_metal_set_overflow(
     const uint64_t *keys,
     const unsigned char *hashes,
     const uint32_t *offsets,
@@ -1400,15 +1767,15 @@ int metal_md5salt_set_overflow(
     }
 }
 
-void metal_md5salt_set_max_iter(int max_iter) {
+void gpu_metal_set_max_iter(int max_iter) {
     _max_iter = (max_iter < 1) ? 1 : max_iter;
 }
 
-void metal_md5salt_set_op(int op) {
+void gpu_metal_set_op(int op) {
     _gpu_op = op;
 }
 
-uint32_t *metal_md5salt_dispatch_batch(
+uint32_t *gpu_metal_dispatch_batch(
     const char *hexhashes,
     const uint16_t *hexlens,
     int num_words,
@@ -1416,7 +1783,7 @@ uint32_t *metal_md5salt_dispatch_batch(
 {
     @autoreleasepool {
         *nhits_out = 0;
-        if (!mtl_ready || !_dispatch_bufs_ready || !mtl_pipeline_batch) return NULL;
+        if (!mtl_ready || !_dispatch_bufs_ready || !mtl_pipelines[JOB_MD5SALT]) return NULL;
         if (num_words <= 0 || _salts_count <= 0) return NULL;
 
         /* Create word data buffer: 256 bytes per word, packed */
@@ -1452,8 +1819,9 @@ uint32_t *metal_md5salt_dispatch_batch(
         id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
 
         id<MTLComputePipelineState> pipeline =
-            (_gpu_op == 542 && mtl_pipeline_sub8) ? mtl_pipeline_sub8 :
-            (_max_iter > 1 && mtl_pipeline_iter) ? mtl_pipeline_iter : mtl_pipeline_batch;
+            (_max_iter > 1 && mtl_pipeline_iter) ? mtl_pipeline_iter :
+            (_gpu_op >= 0 && _gpu_op < JOB_DONE && mtl_pipelines[_gpu_op]) ? mtl_pipelines[_gpu_op] : nil;
+        if (!pipeline) { [cmdbuf release]; return NULL; }
         [enc setComputePipelineState:pipeline];
         [enc setBuffer:b_hexhashes       offset:0 atIndex:0];
         [enc setBuffer:b_hexlens         offset:0 atIndex:1];
@@ -1510,7 +1878,7 @@ uint32_t *metal_md5salt_dispatch_batch(
 
 /* ---- Double-buffer slot API ---- */
 
-int metal_md5salt_init_slots(int max_salt_count, int max_salt_bytes) {
+int gpu_metal_init_slots(int max_salt_count, int max_salt_bytes) {
     @autoreleasepool {
         if (!mtl_ready) return -1;
         if (max_salt_count < 1024) max_salt_count = 1024;
@@ -1544,13 +1912,13 @@ int metal_md5salt_init_slots(int max_salt_count, int max_salt_bytes) {
     }
 }
 
-int metal_md5salt_submit_slot(int slot,
+int gpu_metal_submit_slot(int slot,
     const char *hexhashes, const uint16_t *hexlens, int num_words,
     const char *salts, const uint32_t *salt_offsets,
     const uint16_t *salt_lens, int num_salts)
 {
     @autoreleasepool {
-        if (!gpu_slots_ready || !mtl_pipeline_batch) return -1;
+        if (!gpu_slots_ready || !mtl_pipelines[JOB_MD5SALT]) return -1;
         if (slot < 0 || slot >= GPU_NUM_SLOTS) return -1;
         if (num_words <= 0 || num_words > GPUBATCH_MAX) return -1;
         if (num_salts <= 0) return -1;
@@ -1581,7 +1949,12 @@ int metal_md5salt_submit_slot(int slot,
         id<MTLCommandBuffer> cmdbuf = [mtl_queue commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
 
-        [enc setComputePipelineState:mtl_pipeline_batch];
+        { id<MTLComputePipelineState> ps =
+            (_max_iter > 1 && mtl_pipeline_iter) ? mtl_pipeline_iter :
+            (_gpu_op >= 0 && _gpu_op < JOB_DONE && mtl_pipelines[_gpu_op]) ? mtl_pipelines[_gpu_op] : nil;
+          if (!ps) { [cmdbuf release]; return -1; }
+          [enc setComputePipelineState:ps];
+        }
         [enc setBuffer:s->buf_hexhashes  offset:0 atIndex:0];
         [enc setBuffer:s->buf_hexlens    offset:0 atIndex:1];
         [enc setBuffer:s->buf_hexlens    offset:0 atIndex:2];
@@ -1611,7 +1984,7 @@ int metal_md5salt_submit_slot(int slot,
         }
 
         uint64_t total_threads = (uint64_t)num_words * num_salts;
-        NSUInteger tpg = [mtl_pipeline_batch maxTotalThreadsPerThreadgroup];
+        NSUInteger tpg = [mtl_pipelines[JOB_MD5SALT] maxTotalThreadsPerThreadgroup];
         if (tpg > 256) tpg = 256;
         MTLSize gridSize = MTLSizeMake(total_threads, 1, 1);
         MTLSize groupSize = MTLSizeMake(tpg, 1, 1);
@@ -1625,7 +1998,7 @@ int metal_md5salt_submit_slot(int slot,
     }
 }
 
-uint32_t *metal_md5salt_wait_slot(int slot, int *nhits_out) {
+uint32_t *gpu_metal_wait_slot(int slot, int *nhits_out) {
     @autoreleasepool {
         *nhits_out = 0;
         if (slot < 0 || slot >= GPU_NUM_SLOTS) return NULL;
@@ -1641,7 +2014,7 @@ uint32_t *metal_md5salt_wait_slot(int slot, int *nhits_out) {
     }
 }
 
-int metal_md5salt_dispatch(
+int gpu_metal_dispatch(
     const char *words,
     const uint32_t *word_offsets,
     const uint16_t *word_lens,
