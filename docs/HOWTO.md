@@ -163,18 +163,9 @@ This is how your directory evolves over time:
 50m.MD5SALTx01    # Solved salted MD5 hashes
 ```
 
-### Filtering solved hashes from input
+### Automatic solved-hash removal
 
-Optionally, after running mdsplit, you can remove already-solved hashes from `.txt` files to speed up future runs. Use rling to subtract found hashes:
-
-```bash
-# Extract just the hashes from solved results
-cut -d' ' -f2 50m.MD5x01 | cut -d: -f1 > solved_hashes.txt
-
-# Remove them from the input
-rling 50m.txt solved_hashes.txt > 50m_remaining.txt
-mv 50m_remaining.txt 50m.txt
-```
+mdsplit automatically removes solved hashes from the `.txt` files as it processes results. After running mdsplit, each `.txt` file contains only the remaining unsolved hashes — no manual filtering step is needed. This is why keeping the `.orig` file is important: the `.txt` file shrinks over time as hashes are solved and moved to their `.HASHTYPE` output files.
 
 ## Companion Tools
 
@@ -188,8 +179,53 @@ mdxfind is part of an ecosystem of tools that work together:
 | **hashpipe** | Hash verification — confirms found passwords are correct |
 | **procrule** | Rule-based password mutation engine |
 | **rling** | High-speed line deduplication and subtraction |
+| **mdxpause** | Pause and resume running mdxfind instances |
 
 *Detailed guides for getpass, procrule, and other tools will be added in future updates.*
+
+### Pausing and Resuming with mdxpause
+
+Long-running mdxfind jobs can be paused and resumed without losing progress. This is useful when you need the CPU for something else temporarily.
+
+**Start a job:**
+
+```bash
+mdxfind -M e31 -F sm-saltfull.txt rockyou.txt > results.res 2>progress.err &
+```
+
+**Pause it** — with the PID if known, or interactively if not:
+
+```bash
+# If you know the PID:
+mdxpause pause 117550
+
+# If you don't, mdxpause finds running instances automatically:
+mdxpause pause
+  pause PID 117550 (./mdxfind -M e31 -F sm-saltfull.txt rockyou.txt)... OK
+```
+
+mdxfind prints a pause notice to stderr with a restart hint:
+
+```
+MDXfind process (117550) paused at 2026-03-30 10:04:29, restart with -w 3073 on rockyou.txt
+```
+
+While paused, progress stops — the line count and hash rate freeze. The process remains in memory and can be resumed at any time.
+
+**Resume it:**
+
+```bash
+mdxpause resume 117550
+```
+
+mdxfind logs the resume and how long it was paused:
+
+```
+MDXfind process (117550) resumed (paused 0:00:00:15)
+Working on rockyou.txt, w=9, line 5449530, Found=25728, 704.68Mh/s, 580.67c/s
+```
+
+Processing continues exactly where it left off. On Linux/macOS/FreeBSD, mdxpause uses SIGUSR1 (pause) and SIGUSR2 (resume). On Windows, it uses named events.
 
 ## Tips
 

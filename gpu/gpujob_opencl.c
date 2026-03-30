@@ -11,6 +11,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 #include <stdatomic.h>
 #include "mdxfind.h"
 #include "job_types.h"
@@ -545,7 +550,11 @@ struct jobg *gpujob_get_free(char *filename, unsigned int startline) {
 get_buffer:
     if (MDXpause) {
         __sync_fetch_and_add(&MDXpaused_count, 1);
+#ifdef _WIN32
+        while (MDXpause) Sleep(2000);
+#else
         while (MDXpause) sleep(2);
+#endif
         __sync_fetch_and_sub(&MDXpaused_count, 1);
     }
     possess(GPUFreeWaiting);

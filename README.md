@@ -527,6 +527,19 @@ mdsplit -p solved_ -f results.txt *.txt
 3. Scans the specified hash files for matching hashes and removes them (the hash is now solved)
 4. Uses Judy arrays for O(1) hash lookups, handling large files efficiently
 
+## mdxpause
+
+**mdxpause** lists running mdxfind instances and pauses or resumes them interactively.
+
+### Usage
+
+```
+mdxpause pause     # list running instances, select one to pause
+mdxpause resume    # list running instances, select one to resume
+```
+
+On Linux/macOS/FreeBSD, sends SIGUSR1 (pause) / SIGUSR2 (resume). On Windows, uses named events. Useful for temporarily freeing CPU resources without losing progress.
+
 ## Memory Efficiency
 
 mdxfind is designed to handle massive hash collections. The hybrid compact table stores hash data in a packed byte buffer with compact fingerprint indices, and only overflows into Judy arrays for the rare collisions that exceed the 16-probe limit. This is far more memory-efficient than conventional hash tables:
