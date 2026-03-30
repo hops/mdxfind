@@ -45,9 +45,10 @@ else ifeq ($(UNAME_S),FreeBSD)
   INCEXTRA = -I/usr/local/include
   # OpenCL GPU acceleration on FreeBSD (requires: pkg install opencl ocl-icd)
   ifeq ($(UNAME_M),x86_64)
-    OPENCL_GPU = 1
-    OSOPT += -DOPENCL_GPU=1
-    LDEXTRA += -lOpenCL
+    ifneq ($(wildcard /usr/include/CL/cl.h /usr/local/include/CL/cl.h),)
+      OPENCL_GPU = 1
+      OSOPT += -DOPENCL_GPU=1
+    endif
   endif
 else
   # Linux and others
@@ -55,13 +56,10 @@ else
   ICONV =
   LDEXTRA = -ldl
   INCEXTRA = -I/usr/local/include
-  # OpenCL GPU acceleration on Linux x86_64 (requires: OpenCL headers + ICD loader)
-  ifeq ($(UNAME_M),x86_64)
-    ifneq ($(wildcard /usr/include/CL/cl.h /usr/local/include/CL/cl.h),)
-      OPENCL_GPU = 1
-      OSOPT += -DOPENCL_GPU=1
-      LDEXTRA += -lOpenCL
-    endif
+  # OpenCL GPU acceleration on Linux (requires: OpenCL headers + runtime or dynload)
+  ifneq ($(wildcard /usr/include/CL/cl.h /usr/local/include/CL/cl.h),)
+    OPENCL_GPU = 1
+    OSOPT += -DOPENCL_GPU=1
   endif
 endif
 
@@ -96,10 +94,10 @@ ifdef METAL_GPU
   MDXFIND_OBJS += metal_md5salt.o gpujob.o
 endif
 
-# OpenCL GPU objects (Linux, FreeBSD, Windows)
+# OpenCL GPU objects (Linux, FreeBSD, aarch64)
 ifdef OPENCL_GPU
-  MDXFIND_OBJS += mdxocl/opencl_md5salt.o mdxocl/gpujob_opencl.o
-  CFLAGS += -Imdxocl
+  MDXFIND_OBJS += gpu/gpu_opencl.o gpu/gpujob_opencl.o gpu/opencl_dynload.o
+  CFLAGS += -Igpu
 endif
 
 # argon2 fill-block selection: SSE on x86_64, portable ref elsewhere
@@ -114,7 +112,7 @@ else
   ARGON2_FILL_OBJ = ref.o
 endif
 
-all: mdxfind mdsplit getpass
+all: mdxfind mdsplit getpass mdxpause
 
 mdxfind.o: mdxfind.c mdxfind.h job_types.h
 	$(CC) $(CFLAGS) -c mdxfind.c
@@ -172,16 +170,19 @@ endif
 job_types.h: mdxfind.c
 	(echo '/* Auto-generated from mdxfind.c -- do not edit */'; echo '#ifndef NO_JOB_TYPES'; grep '^#define JOB_' mdxfind.c; echo '#endif') > job_types.h
 
-# OpenCL GPU source files (Linux, FreeBSD)
-mdxocl/md5salt_kernel_str.h: mdxocl/md5salt.cl
-	python3 -c 'import sys; s=open("mdxocl/md5salt.cl").read(); f=open("mdxocl/md5salt_kernel_str.h","w"); f.write("/* Auto-generated from md5salt.cl -- do not edit */\n"); f.write("static const char md5salt_kernel_str[] =\n"); [f.write("    \""+l.replace(chr(92),chr(92)+chr(92)).replace(chr(34),chr(92)+chr(34))+"\\n\"\n") for l in s.split(chr(10))]; f.write(";\n")'
+# OpenCL GPU source files
+gpu/gpu_kernels_str.h: gpu/gpu_kernels.cl
+	python3 -c 'import sys; s=open("gpu/gpu_kernels.cl").read(); f=open("gpu/gpu_kernels_str.h","w"); f.write("/* Auto-generated from gpu_kernels.cl -- do not edit */\n"); f.write("static const char gpu_kernels_str[] =\n"); [f.write("    \""+l.replace(chr(92),chr(92)+chr(92)).replace(chr(34),chr(92)+chr(34))+"\\n\"\n") for l in s.split(chr(10))]; f.write(";\n")'
 
 ifdef OPENCL_GPU
-mdxocl/opencl_md5salt.o: mdxocl/opencl_md5salt.c mdxocl/opencl_md5salt.h mdxocl/md5salt_kernel_str.h
-	$(CC) -DOPENCL_GPU=1 -DCL_TARGET_OPENCL_VERSION=120 -I. -Imdxocl $(INCEXTRA) -O3 -pthread -c mdxocl/opencl_md5salt.c -o mdxocl/opencl_md5salt.o
+gpu/gpu_opencl.o: gpu/gpu_opencl.c gpu/gpu_opencl.h gpu/gpu_kernels_str.h
+	$(CC) -DOPENCL_GPU=1 -DCL_TARGET_OPENCL_VERSION=120 -I. -Igpu $(INCEXTRA) -O3 -pthread -c gpu/gpu_opencl.c -o gpu/gpu_opencl.o
 
-mdxocl/gpujob_opencl.o: mdxocl/gpujob_opencl.c mdxocl/opencl_md5salt.h gpujob.h job_types.h mdxfind.h
-	$(CC) -DOPENCL_GPU=1 -I. -Imdxocl $(INCEXTRA) -O3 -pthread -c mdxocl/gpujob_opencl.c -o mdxocl/gpujob_opencl.o
+gpu/gpujob_opencl.o: gpu/gpujob_opencl.c gpu/gpu_opencl.h gpujob.h job_types.h mdxfind.h
+	$(CC) -DOPENCL_GPU=1 -I. -Igpu $(INCEXTRA) -O3 -pthread -c gpu/gpujob_opencl.c -o gpu/gpujob_opencl.o
+
+gpu/opencl_dynload.o: gpu/opencl_dynload.c gpu/opencl_dynload.h
+	$(CC) -DOPENCL_GPU=1 -DCL_TARGET_OPENCL_VERSION=120 -I. -Igpu $(INCEXTRA) -O3 -pthread -c gpu/opencl_dynload.c -o gpu/opencl_dynload.o
 endif
 
 mdsplit.o: mdsplit.c
@@ -209,12 +210,15 @@ getpass.o: getpass.c
 getpass: getpass.o
 	$(CC) $(LDFLAGS) -o getpass getpass.o
 
+mdxpause: mdxpause.c
+	$(CC) -O3 -o mdxpause mdxpause.c
+
 clean:
 	rm -f mdxfind mdsplit $(MDXFIND_OBJS) $(MDSPLIT_OBJS)
 	rm -f argon2/*.o argon2/argon2.a
 	rm -f lm/*.o lm/lm.a
 	rm -f gosthash/*.o
-	rm -f mdxocl/*.o
+	rm -f gpu/*.o
 
 distclean: clean
 	rm -rf deps

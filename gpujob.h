@@ -28,6 +28,9 @@ extern "C" {
 #define GPU_CAT_NONE     0   /* not GPU-capable */
 #define GPU_CAT_SALTED   1   /* salted: GPU does MD5(hex_hash + salt) per salt */
 #define GPU_CAT_ITER     2   /* unsalted iterated: GPU does MD5(hex) iterations */
+#define GPU_CAT_SALTPASS 3   /* salted: GPU does MD5(salt + raw_password) per salt */
+
+#define GPU_MAX_PASSLEN  55  /* max password length for GPU (single MD5 block with salt) */
 
 /* Returns GPU category for an op code, or GPU_CAT_NONE */
 int gpu_op_category(int op);
@@ -78,6 +81,9 @@ void gpujob_submit(struct jobg *g);
 
 /* Returns 1 if GPU job system is initialized and ready. */
 int gpujob_available(void);
+
+/* Returns per-device batch limit (min across all GPUs). */
+int gpujob_batch_max(void);
 
 #ifdef __cplusplus
 }

@@ -7,6 +7,9 @@
 #include <wctype.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <signal.h>
+#endif
 
 /* Windows stat() overflows on files > 2GB; use 64-bit version */
 #ifdef _WIN32
@@ -126,11 +129,11 @@ static void arc4random_buf(void *buf, size_t nbytes) {
 
 #ifdef GPU_ENABLED
 #if defined(__APPLE__) && defined(METAL_GPU)
-#include "metal_md5salt.h"
+#include "gpu_metal.h"
 #elif defined(CUDA_GPU)
 #include "cuda_md5salt.h"
 #elif defined(OPENCL_GPU)
-#include "opencl_md5salt.h"
+#include "gpu_opencl.h"
 #endif
 #define NO_JOB_TYPES 1
 #include "gpujob.h"
@@ -163,9 +166,26 @@ int Neon;
 #define mysha1 SHA1
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.240 2026/03/29 07:08:02 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.245 2026/03/30 02:34:48 dlr Exp $";
 /*
  * $Log: mdxfind.c,v $
+ * Revision 1.245  2026/03/30 02:34:48  dlr
+ * Add YESCRYPT (e995, hashcat mode 67000): loader, procjob, -z bootstrap.
+ * Widen Maphashcat struct from uint16 to uint32 to support modes > 65535.
+ *
+ * Revision 1.244  2026/03/29 22:32:14  dlr
+ * SIGUSR1/2 pause/resume with state machine, restart line tracking, per-device batch scaling.
+ * MD5SALTPASS (e394) GPU kernel for Metal and OpenCL. gpujob_batch_max for Metal.
+ *
+ * Revision 1.243  2026/03/29 18:34:02  dlr
+ * Per-device GPU batch scaling, gpujob_batch_max(), bounds check on hit entries.
+ *
+ * Revision 1.242  2026/03/29 17:00:53  dlr
+ * GPU_CAT_SALTPASS support, gpu_try_pack raw password packing, [GPU] markers in -h output.
+ *
+ * Revision 1.241  2026/03/29 14:23:43  dlr
+ * Rename GPU includes: metal_md5salt -> gpu_metal, opencl_md5salt -> gpu_opencl.
+ *
  * Revision 1.240  2026/03/29 07:08:02  dlr
  * Extract gpu_try_pack() from inline procjob code. Add is_gpu_op/gpu_op_category
  * infrastructure. GPU_CAT_ITER kernel ready but disabled pending batch size tuning.
@@ -183,7 +203,7 @@ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.240 202
  *
  * Revision 1.236  2026/03/28 10:19:36  dlr
  * GPU: stamp jobg line_num from job->startline for priority dispatch ordering.
- * Add gpu_device_filter global. Add -G list immediate exit via opencl_md5salt_list_devices().
+ * Add gpu_device_filter global. Add -G list immediate exit via gpu_opencl_list_devices().
  * Intel GPU path: add line_num stamp.
  *
  * Revision 1.235  2026/03/27 23:14:48  dlr
@@ -1129,6 +1149,9 @@ static void gost2012_64_std(char *data, int len, unsigned char *dest) {
 extern char *crypt_rn(const char *key, const char *setting, void *data, int size);
 
 #include "argon2/argon2.h"
+
+/* Yescrypt per-thread local memory (reused across calls) */
+static __thread yescrypt_local_t *yescrypt_tls_local;
 
 /* Argon2 pre-allocated workspace: thread-local pointer for custom allocator */
 static __thread uint8_t *argon2_tls_ws;
@@ -3244,7 +3267,7 @@ void *mymalloc(int size, int align) {
 int Maxiter, ThreadCount, Maxniter;
 
 struct MapHashcat {
-  short unsigned int hc, mdx;
+  unsigned int hc, mdx;
 } Maphashcat[] = {
     {0,    1},
     {10,   373},
@@ -3642,6 +3665,7 @@ struct MapHashcat {
     {35500, 993},  /* 35500 | WordPress bcrypt(hmac-sha384($pass)) */
     {35600, 994},  /* 35600 | gost12512crypt */
     {35800, 992},  /* 35800 | Symfony Legacy SHA256 */
+    {67000, 995},  /* 67000 | yescrypt */
     {65535, 65535}}; /*EOF */
 
 char *Types[] = {
@@ -4101,6 +4125,7 @@ char *Types[] = {
     "SYMFONY256",
     "WPBCRYPT",
     "GOST12512CRYPT",
+    "YESCRYPT",
 
 NULL
 
@@ -5123,6 +5148,7 @@ NULL
 #define JOB_SYMFONY256      992
 #define JOB_WPBCRYPT        993
 #define JOB_GOST12512CRYPT  994
+#define JOB_YESCRYPT        995
 
 #define JOB_DONE 2000
 
@@ -6141,6 +6167,7 @@ static unsigned short TypeOpts[JOB_DONE] = {
 [992] = TYPEOPT_NEEDSF | TYPEOPT_NEEDSALT | TYPEOPT_SALTJUDY, /* SYMFONY256 */
 [993] = TYPEOPT_NEEDSJ | TYPEOPT_SALTJUDY,                    /* WPBCRYPT */
 [994] = TYPEOPT_NEEDSJ | TYPEOPT_NEEDSALT | TYPEOPT_SALTJUDY, /* GOST12512CRYPT */
+[995] = TYPEOPT_NEEDSJ | TYPEOPT_NEEDSALT | TYPEOPT_SALTJUDY, /* YESCRYPT */
 };
 
 unsigned long Iter_Count[] = {0, 10, 10, 100, 100, 1000, 1000, 1000, 1000, 10000, 10000, 10000, 10000, 100000, 100000, 100000, 100000};
@@ -6337,6 +6364,14 @@ static lock *ReadBuf0, *ReadBuf1, *HashWaiting;
 static lock *ServerState;
 unsigned long long Tothash, Totfound, Totrules;
 atomic_ullong *Totalfound[JOB_DONE], *RuleCnt;
+
+/* SIGUSR1 pauses, SIGUSR2 resumes */
+volatile int MDXpause = 0;
+volatile int MDXpaused_count = 0;
+volatile unsigned int MDXlowest_line = 0xFFFFFFFF;
+volatile char *MDXlowest_file = NULL;
+static void sig_pause(int sig) { (void)sig; MDXpause = 1; }
+static void sig_resume(int sig) { (void)sig; MDXpause = 0; }
 
 
 /* compact_resize: rebuild compact table at double the current size.
@@ -6773,6 +6808,7 @@ static const struct { int job; const char *salt; } default_salts[] = {
   { JOB_SYMFONY256, "salt1234salt5678" },
   { JOB_WPBCRYPT, "$2b$05$RndSa1tRndSa1tRndSa1tu" },
   { JOB_GOST12512CRYPT, "$gost12512hash$defaultS$" },
+  { JOB_YESCRYPT, "$y$j9T$oJqQoBLMgF5$" },
   { 0, NULL }
 };
 static const struct { int job; const char *user; } default_users[] = {
@@ -8088,13 +8124,21 @@ static inline void lm_des_key(const unsigned char *raw7, DES_key_schedule *ks)
 static int gpu_try_pack(struct jobg **pjobg, struct job *job,
                         union HashU *curin, int nsalts_job)
 {
+    if (MDXpause) {
+      __sync_fetch_and_add(&MDXpaused_count, 1);
+      while (MDXpause) sleep(2);
+      __sync_fetch_and_sub(&MDXpaused_count, 1);
+    }
     int cat = gpu_op_category(job->op);
     if (cat == GPU_CAT_NONE) return 0;
     if (!gpujob_available()) return 0;
     if (Rotatehash || Printall) return 0;
 
     /* Salted types need enough salts to justify GPU dispatch */
-    if (cat == GPU_CAT_SALTED && nsalts_job < 100) return 0;
+    if ((cat == GPU_CAT_SALTED || cat == GPU_CAT_SALTPASS) && nsalts_job < 100) return 0;
+
+    /* Salt+password types: password must fit in GPU limit */
+    if (cat == GPU_CAT_SALTPASS && (job->clen > GPU_MAX_PASSLEN || job->clen <= 0 || !job->pass)) return 0;
 
     /* Iteration types need Maxiter > 1 to benefit from GPU */
     if (cat == GPU_CAT_ITER && Maxiter <= 1) return 0;
@@ -8111,6 +8155,14 @@ static int gpu_try_pack(struct jobg **pjobg, struct job *job,
     }
 
     int idx = g->count;
+
+    /* GPU_CAT_SALTPASS: pack raw password bytes (kernel does salt + password) */
+    if (cat == GPU_CAT_SALTPASS) {
+        memcpy(g->hexhash[idx], job->pass, job->clen);
+        g->hexlen[idx] = job->clen;
+        goto gpu_pack_done;
+    }
+
     unsigned char *hb = curin->h;
     uint32_t *mw = (uint32_t *)g->hexhash[idx];
 
@@ -8152,6 +8204,7 @@ static int gpu_try_pack(struct jobg **pjobg, struct job *job,
         break;
     }
 
+gpu_pack_done:
     /* Pack password data for hit verification */
     g->passoff[idx] = g->passbuf_pos;
     memcpy(&g->passbuf[g->passbuf_pos], job->pass, job->clen);
@@ -8161,8 +8214,8 @@ static int gpu_try_pack(struct jobg **pjobg, struct job *job,
     g->passbuf_pos += job->clen;
     g->count++;
 
-    /* Submit when full */
-    if (g->count >= GPUBATCH_MAX ||
+    /* Submit when batch limit reached */
+    if (g->count >= gpujob_batch_max() ||
         g->passbuf_pos + 4096 > GPUBATCH_PASS) {
         gpujob_submit(g);
         *pjobg = NULL;
@@ -8325,7 +8378,14 @@ while (1) {
   if (WorkHead == NULL)
     WorkTail = &WorkHead;
   twist(WorkWaiting, BY, -1);
-  
+
+
+  if (MDXpause) {
+    __sync_fetch_and_add(&MDXpaused_count, 1);
+    while (MDXpause) sleep(2);
+    __sync_fetch_and_sub(&MDXpaused_count, 1);
+  }
+
 
   numline = 0;
   rulecnt = 0;
@@ -8475,6 +8535,17 @@ while (1) {
     if (!nsalts_job) Typedone[job->op] = 1;
   }
 
+  /* Track lowest active line at job start */
+  { char *fn = job->filename;
+    unsigned int sl = job->startline;
+    if (MDXlowest_file == NULL || fn < MDXlowest_file) {
+      MDXlowest_file = fn;
+      MDXlowest_line = sl;
+    } else if (fn == MDXlowest_file && sl < MDXlowest_line) {
+      MDXlowest_line = sl;
+    }
+  }
+
   for (curline = job->startline; numline < job->numline; curline++, numline++, lineproc++) {
 
     if (ltime.tv_sec != current.tv_sec) {
@@ -8490,6 +8561,20 @@ while (1) {
       lineproc = hashcnt = rulecnt = found = 0;
       ltime = current;
       release(FreeWaiting);
+      /* Update lowest active line and check for pause (once per second) */
+      { char *fn = job->filename;
+        if (MDXlowest_file == NULL || fn < MDXlowest_file) {
+          MDXlowest_file = fn;
+          MDXlowest_line = curline;
+        } else if (fn == MDXlowest_file && curline < MDXlowest_line) {
+          MDXlowest_line = curline;
+        }
+      }
+      if (MDXpause) {
+        __sync_fetch_and_add(&MDXpaused_count, 1);
+        while (MDXpause) sleep(2);
+        __sync_fetch_and_sub(&MDXpaused_count, 1);
+      }
     }
 
     /*
@@ -11439,6 +11524,11 @@ sha512salt_s:
                   linebuf[40] = cur[0];
                   mysha1((char *)linebuf, len + 40, curin.h);
                 }
+                if (MDXpause) {
+                  __sync_fetch_and_add(&MDXpaused_count, 1);
+                  while (MDXpause) sleep(2);
+                  __sync_fetch_and_sub(&MDXpaused_count, 1);
+                }
                 checkhash(&curin, 40, 1, job);
                 break;
 
@@ -13128,6 +13218,13 @@ md4utf16:
                   if (!nsalts_job) { Typedone[job->op] = 1; break; }
                 }
                 if (!nsalts_job) { Typedone[job->op] = 1; break; }
+#ifdef GPU_ENABLED
+                if (job->op == JOB_MD5SALTPASS &&
+                    gpu_try_pack(&my_jobg, job, NULL, nsalts_job)) {
+                  hashcnt += nsalts_job;
+                  break;
+                }
+#endif
                 { int si;
                 for (si = 0; si < nsalts_job; si++) {
                   saltlen = saltsnap[si].saltlen;
@@ -13903,6 +14000,12 @@ sha1_truncsalt:
                   if (!nsalts_job) { Typedone[job->op] = 1; break; }
                 }
                 if (!nsalts_job) { Typedone[job->op] = 1; break; }
+#ifdef GPU_ENABLED
+                if (gpu_try_pack(&my_jobg, job, NULL, nsalts_job)) {
+                  hashcnt += nsalts_job;
+                  break;
+                }
+#endif
                 { int si;
                 for (si = 0; si < nsalts_job; si++) {
                   saltlen = saltsnap[si].saltlen;
@@ -18491,6 +18594,51 @@ sha11saltmd5:
                   }
                 break;
 
+              case JOB_YESCRYPT:
+                if (Typedone[job->op]) break;
+                /* yescrypt (67000): $y$params$salt$hash */
+                if (len > MAXLINE) break;
+                  if (!snap_valid) {
+                    nsalts_job = build_salt_snapshot(saltsnap, saltpool,
+                                    Typesalt[job->op], tsalt, Printall);
+                    snap_valid = 1;
+                    if (!nsalts_job) { Typedone[job->op] = 1; break; }
+                  }
+                  if (!nsalts_job) { Typedone[job->op] = 1; break; }
+                  /* Initialize thread-local yescrypt memory if needed */
+                  if (!yescrypt_tls_local) {
+                    yescrypt_tls_local = calloc(1, sizeof(yescrypt_local_t));
+                    if (yescrypt_tls_local)
+                      yescrypt_init_local(yescrypt_tls_local);
+                  }
+                  if (!yescrypt_tls_local) break;
+                  { int si;
+                  for (si = 0; si < nsalts_job; si++) {
+                      /* saltsnap[si].salt = $y$params$salt$ (the setting) */
+                      uint8_t *result;
+                      result = yescrypt_r(NULL, yescrypt_tls_local,
+                                          (const uint8_t *)cur, len,
+                                          (const uint8_t *)saltsnap[si].salt, NULL,
+                                          (uint8_t *)mdbuf, MAXLINE);
+                      hashcnt++;
+                      if (result) {
+                        Word_t *PV2;
+                        JSLG(PV2, JudyJ[JOB_YESCRYPT], (unsigned char *)result);
+                        if (Printall || PV2) {
+                          if (!Printall) {
+                            PV_DEC(saltsnap[si].PV);
+                            if (*saltsnap[si].PV == 0) {
+                              saltsnap[si] = saltsnap[--nsalts_job]; si--;
+                            }
+                          }
+                          prfound(job, (char *)result);
+                        }
+                      }
+                  }
+                  if (!nsalts_job) Typedone[job->op] = 1;
+                  }
+                break;
+
               case JOB_MEDIAWIKI:
                 if (Typedone[job->op]) break;
                 /* md5($salt."-".md5($pass)) — iterate unique salts from Typesalt Judy */
@@ -19245,6 +19393,11 @@ MD5SALTstart:
               {
               /* CPU salt loop (original) */
               for (si = 0; si < nsalts_job; si++) {
+                if (MDXpause) {
+                  __sync_fetch_and_add(&MDXpaused_count, 1);
+                  while (MDXpause) sleep(2);
+                  __sync_fetch_and_sub(&MDXpaused_count, 1);
+                }
 		if (!Printall && *saltsnap[si].PV == 0) continue;
                 s1 = saltsnap[si].salt;
                 saltlen = saltsnap[si].saltlen;
@@ -19321,6 +19474,11 @@ MD5SALTstart:
                   pcnt = 0;
                   pcnt2 = 0;
                   for (si = 0; si < nsalts_job; si++) {
+                    if (MDXpause) {
+                      __sync_fetch_and_add(&MDXpaused_count, 1);
+                      while (MDXpause) sleep(2);
+                      __sync_fetch_and_sub(&MDXpaused_count, 1);
+                    }
                     if (!Printall && *saltsnap[si].PV == 0) continue;
                     if (saltsnap[si].saltlen > 80) continue;
                     dd32 = &d32[(len/4) * 4];
@@ -21983,6 +22141,11 @@ MD_SHA_start:
                   }
 		  if (currule) {
                   while (*((unsigned short int *)currule)) {
+                    if (MDXpause) {
+                      __sync_fetch_and_add(&MDXpaused_count, 1);
+                      while (MDXpause) sleep(2);
+                      __sync_fetch_and_sub(&MDXpaused_count, 1);
+                    }
                     cur = job->pass;
                     job->Ruleindex++;
                     x = applyrule(tline,cur,orig_len,currule+2);
@@ -22070,6 +22233,11 @@ MD_SHA_start:
                   f32 = (uint32_t *) hashes;
 		  if (currule) {
                   while (*((unsigned short int *) currule)) {
+                    if (MDXpause) {
+                      __sync_fetch_and_add(&MDXpaused_count, 1);
+                      while (MDXpause) sleep(2);
+                      __sync_fetch_and_sub(&MDXpaused_count, 1);
+                    }
                     x = applyrule(cur, ljob[ljobi].pass, len, currule + 2);
                     currule += *((unsigned short int *) currule) + 2;
                     job->Ruleindex++;
@@ -33136,18 +33304,29 @@ void build_compact_table(void) {
             overflow_count, bt);
   }
 #ifdef GPU_ENABLED
+  /* Only initialize GPU if at least one GPU-capable hash type is selected */
+  { int need_gpu = 0;
+    int gpu_ops[] = { JOB_MD5SALT, JOB_MD5UCSALT, JOB_MD5revMD5SALT, JOB_MD5sub8_24SALT,
+                      JOB_MD5SALTPASS, JOB_MD5PASSSALT, -1 };
+    for (int gi = 0; gpu_ops[gi] >= 0; gi++) {
+      Word_t grc;
+      J1T(grc, Dohash, gpu_ops[gi]);
+      if (grc) { need_gpu = 1; break; }
+    }
+    if (!need_gpu) NoMetal = 1;
+  }
   if (!NoMetal) {
     int gpu_ok = -1;
 #if defined(__APPLE__) && defined(METAL_GPU)
-    gpu_ok = metal_md5salt_init();
+    gpu_ok = gpu_metal_init();
 #elif defined(CUDA_GPU)
     gpu_ok = cuda_md5salt_init();
 #elif defined(OPENCL_GPU)
-    gpu_ok = opencl_md5salt_init();
+    gpu_ok = gpu_opencl_init();
 #endif
     if (gpu_ok == 0 && CompactFP && HashDataBuf && HashDataOff && HashDataLen && CompactSize > 0) {
 #if defined(__APPLE__) && defined(METAL_GPU)
-      metal_md5salt_set_compact_table(CompactFP, CompactIdx,
+      gpu_metal_set_compact_table(CompactFP, CompactIdx,
           CompactSize, CompactMask,
           HashDataBuf, HashDataBufUsed,
           HashDataOff, HashDataCount, HashDataLen);
@@ -33157,9 +33336,9 @@ void build_compact_table(void) {
           HashDataBuf, HashDataBufUsed,
           HashDataOff, HashDataCount, HashDataLen);
 #elif defined(OPENCL_GPU)
-      { int ndev = opencl_md5salt_num_devices();
+      { int ndev = gpu_opencl_num_devices();
         for (int di = 0; di < ndev; di++)
-          opencl_md5salt_set_compact_table(di, CompactFP, CompactIdx,
+          gpu_opencl_set_compact_table(di, CompactFP, CompactIdx,
               CompactSize, CompactMask,
               HashDataBuf, HashDataBufUsed,
               HashDataOff, HashDataCount, HashDataLen);
@@ -33173,15 +33352,32 @@ void build_compact_table(void) {
 }
 
 
+static void format_rate(double val, double *out, char **suffix) {
+  *suffix = "";
+  if (val < 0.0) val = 0.0;
+  if (val > 1000.0) { *suffix = "K"; val /= 1000.0; }
+  if (val > 1000.0) { *suffix = "M"; val /= 1000.0; }
+  if (val > 1000.0) { *suffix = "G"; val /= 1000.0; }
+  if (val > 1000.0) { *suffix = "T"; val /= 1000.0; }
+  *out = val;
+}
+
 MDXALIGN void ReportStats(void *dummy) {
   int x;
-  double stime,wtime, lps, hps;
+  double stime, wtime, lps, hps;
   char *mult, *mult1;
   unsigned long long lastline;
+  int pause_state = 0;        /* 0=running, 1=just paused, 2=minutes, 3=hours */
+  time_t pause_start = 0;     /* when pause began */
+  int pause_ticks = 0;        /* 15-second ticks since pause started */
 
   stime = (double) starthash.tv_sec + (double) (starthash.tv_nsec) / 1000000000.0;
   lastline = 0;
   while (1) {
+    if (!MDXpause) {
+      MDXlowest_line = 0xFFFFFFFF; /* reset — threads will re-establish minimum */
+      MDXlowest_file = NULL;
+    }
     for (x = 0; x < 15; x++) {
       possess(HashWaiting);
       if (peek_lock(HashWaiting) != 0) {
@@ -33192,57 +33388,97 @@ MDXALIGN void ReportStats(void *dummy) {
       sleep(1);
       current_utc_time(&current);
     }
-  wtime = (double) current.tv_sec + (double) (current.tv_nsec) / 1000000000.0;
-  wtime -= stime;
-  if (wtime <= 0.0) wtime = 1;
-  if (Totrules) {
-    lps = (double)(Totrules - lastline)/15.0;
-    lastline = Totrules;
-  } else {
-    lps = (double)((TotLines - lastline))/15.0;
-    lastline = TotLines;
-  }
-  hps = (double) Tothash/ wtime;
-  if (hps < 0.0) hps = 0.0;
-  mult1 = "";
-  if (hps > 1000.0) {
-    mult1 = "K";
-    hps /= 1000.0;
-  }
-  if (hps > 1000.0) {
-    mult1 = "M";
-    hps /= 1000.0;
-  }
-  if (hps > 1000.0) {
-    mult1 = "G";
-    hps /= 1000.0;
-  }
-  if (hps > 1000.0) {
-    mult1 = "T";
-    hps /= 1000.0;
-}
 
-  if (lps < 0.0) lps = 0.0;
-  mult = "";
-  if (lps > 1000.0) {
-    mult = "K";
-    lps /= 1000.0;
-  }
-  if (lps > 1000.0) {
-    mult = "M";
-    lps /= 1000.0;
-  }
-  if (lps > 1000.0) {
-    mult = "G";
-    lps /= 1000.0;
-  }
-  if (lps > 1000.0) {
-    mult = "T";
-    lps /= 1000.0;
-  }
-     
-  fprintf(stderr, "Working on %s, w=%ld, line %llu, Found=%llu, %.2f%sh/s, %.2f%sc/s\n", Curfile, peek_lock(WorkWaiting), (Lowline+LowSkip), Totfound,hps, mult1,lps,mult);
-  fflush(stdout);
+    if (MDXpause) {
+      /* --- Paused states --- */
+      if (pause_state == 0) {
+        /* Transition: draining */
+        pause_state = 1;
+        pause_start = time(NULL);
+        pause_ticks = 0;
+      }
+
+      if (pause_state == 1) {
+        /* Draining: waiting for all threads to reach pause loop */
+        int paused = MDXpaused_count;
+        int total = ThreadCount;
+        if (paused >= total) {
+          /* All threads paused — transition to fully paused */
+          pause_state = 2;
+          pause_start = time(NULL);
+          pause_ticks = 0;
+          { char tbuf[64];
+            struct tm *tm = localtime(&pause_start);
+            strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", tm);
+            { unsigned int restart = MDXlowest_line;
+              const char *rfile = (const char *)MDXlowest_file;
+              if (restart == 0xFFFFFFFF) restart = 0;
+              fprintf(stderr, "MDXfind process (%d) paused at %s, restart with -w %u on %s\n",
+                    (int)getpid(), tbuf, restart,
+                    rfile ? rfile : "(unknown)");
+            }
+          }
+        } else {
+          fprintf(stderr, "MDXfind process (%d) pausing... %d/%d threads paused\n",
+                  (int)getpid(), paused, total);
+        }
+        continue;
+      }
+
+      pause_ticks++;
+      time_t elapsed = time(NULL) - pause_start;
+      int minutes = (int)(elapsed / 60);
+      int hours = minutes / 60;
+
+      if (pause_state == 2 && pause_ticks >= 4) {
+        /* After ~1 minute, transition to minutes display */
+        pause_state = 3;
+      }
+      if (pause_state == 3 && minutes >= 60) {
+        /* After 60 minutes, transition to hours display */
+        pause_state = 4;
+      }
+
+      if (pause_state == 3 && (pause_ticks % 4) == 0) {
+        fprintf(stderr, "MDXfind process (%d) paused for %d minute%s\n",
+                (int)getpid(), minutes, minutes == 1 ? "" : "s");
+      } else if (pause_state == 4 && (pause_ticks % (15 * 60)) == 0) {
+        fprintf(stderr, "MDXfind process (%d) paused for %d hour%s\n",
+                (int)getpid(), hours, hours == 1 ? "" : "s");
+      }
+      continue;
+    }
+
+    /* --- Running state --- */
+    if (pause_state > 0) {
+      /* Transition back from paused: print total pause duration */
+      time_t elapsed = time(NULL) - pause_start;
+      int days = (int)(elapsed / 86400);
+      int hrs  = (int)((elapsed % 86400) / 3600);
+      int mins = (int)((elapsed % 3600) / 60);
+      int secs = (int)(elapsed % 60);
+      fprintf(stderr, "MDXfind process (%d) resumed (paused %d:%02d:%02d:%02d)\n",
+              (int)getpid(), days, hrs, mins, secs);
+      pause_state = 0;
+      pause_ticks = 0;
+    }
+
+    wtime = (double) current.tv_sec + (double) (current.tv_nsec) / 1000000000.0;
+    wtime -= stime;
+    if (wtime <= 0.0) wtime = 1;
+    if (Totrules) {
+      lps = (double)(Totrules - lastline)/15.0;
+      lastline = Totrules;
+    } else {
+      lps = (double)((TotLines - lastline))/15.0;
+      lastline = TotLines;
+    }
+    format_rate((double)Tothash / wtime, &hps, &mult1);
+    format_rate(lps, &lps, &mult);
+
+    fprintf(stderr, "Working on %s, w=%ld, line %llu, Found=%llu, %.2f%sh/s, %.2f%sc/s\n",
+            Curfile, peek_lock(WorkWaiting), (Lowline+LowSkip), Totfound, hps, mult1, lps, mult);
+    fflush(stdout);
   }
 }
 
@@ -36863,6 +37099,28 @@ static void load_hash_file(gzFile gi, const char *filename, Pvoid_t *pDoload) {
         continue;
       }
     }
+    /* YESCRYPT (67000): $y$PARAMS$SALT$HASH (43 chars of itoa64)
+     * JudyJ key = full format string; Typesalt = setting ($y$params$salt$) */
+    if (lf[JOB_YESCRYPT] && strncmp(line, "$y$", 3) == 0 && inhashbuf) {
+      /* Find params$salt$hash — need exactly 3 '$' after $y$ */
+      char *p = line + 3;
+      char *salt_start = strchr(p, '$');
+      if (salt_start) {
+        salt_start++;
+        char *hash_start = strchr(salt_start, '$');
+        if (hash_start && (len - (int)(hash_start + 1 - line)) == 43) {
+          char judykey[512], saltkey[256];
+          int setting_len = hash_start - line + 1; /* include trailing $ */
+          snprintf(judykey, sizeof(judykey), "%.*s", (int)len, line);
+          snprintf(saltkey, sizeof(saltkey), "%.*s", setting_len, line);
+          JSLI(PV, JudyJ[JOB_YESCRYPT], (unsigned char *)judykey);
+          JSLI(PV, Typesalt[JOB_YESCRYPT], (unsigned char *)saltkey);
+          if (PV) { if ((*PV)++ == 0) Saltloaded[JOB_YESCRYPT]++; }
+          Foundcnt[JOB_YESCRYPT]++;
+          continue;
+        }
+      }
+    }
     /* MURMUR3 (27800): 8hex:8hex (hash:seed) */
     if (lf[JOB_MURMUR3] && len == 17 && line[8] == ':' && inhashbuf) {
       int m3ok = 1;
@@ -37840,10 +38098,19 @@ int main(int argc, char **argv) {
                 hci += snprintf(hcbuf + hci, sizeof(hcbuf) - hci, "%d", Maphashcat[val].hc);
               }
             }
-            if (hci)
-              printf("e%-*d  %-7s  %-*s  %s\n", ch - 1, x, optbuf, z, Types[x], hcbuf);
-            else
-              printf("e%-*d  %-7s  %-*s  na\n", ch - 1, x, optbuf, z, Types[x]);
+            { const char *gpu = "";
+#ifdef GPU_ENABLED
+              if (x == JOB_MD5SALT || x == JOB_MD5UCSALT ||
+                  x == JOB_MD5revMD5SALT || x == JOB_MD5sub8_24SALT ||
+                  x == JOB_MD5SALTPASS ||
+                  x == JOB_MD5PASSSALT)
+                gpu = " [GPU]";
+#endif
+              if (hci)
+                printf("e%-*d  %-7s  %-*s  %s%s\n", ch - 1, x, optbuf, z, Types[x], hcbuf, gpu);
+              else
+                printf("e%-*d  %-7s  %-*s  na%s\n", ch - 1, x, optbuf, z, Types[x], gpu);
+            }
           }
         }
 	printf("For full usage, use -?, or supply no arguments\n");
@@ -38015,7 +38282,7 @@ int main(int argc, char **argv) {
         if (optarg[0] == 'l' || optarg[0] == 'L') {
           fprintf(stderr, "Available GPU devices:\n");
 #if defined(OPENCL_GPU)
-          opencl_md5salt_list_devices();
+          gpu_opencl_list_devices();
 #elif defined(__APPLE__) && defined(METAL_GPU)
           /* TODO: metal list */
 #endif
@@ -41541,6 +41808,22 @@ usage:
         } else { J1U(RC, Dohash, JOB_GOST12512CRYPT); }
       }
     }
+    /* YESCRYPT: count entries or disable */
+    { long yecnt = 0;
+      line[0] = 0;
+      JSLF(PV, JudyJ[JOB_YESCRYPT], (unsigned char *)line);
+      while (PV) { yecnt++; JSLN(PV, JudyJ[JOB_YESCRYPT], (unsigned char *)line); }
+      if (yecnt) {
+        fprintf(stderr, "Searching through %ld unique YESCRYPT hashes\n", yecnt);
+      } else {
+        J1T(RC, Dohash, JOB_YESCRYPT);
+        if (RC && Printall) {
+          JSLI(PV, JudyJ[JOB_YESCRYPT], (unsigned char *)"$y$j9T$oJqQoBLMgF5$0000000000000000000000000000000000000000000");
+          JSLI(PV, Typesalt[JOB_YESCRYPT], (unsigned char *)"$y$j9T$oJqQoBLMgF5$");
+          if (PV && *PV == 0) *PV = 1;
+        } else { J1U(RC, Dohash, JOB_YESCRYPT); }
+      }
+    }
     /* -z mode: ensure DES/3DES have 16-char salts in SaltArray */
     if (Printall) {
       int need_des = 0;
@@ -42053,14 +42336,18 @@ usage:
   {
     int gpu_avail = 0;
 #if defined(__APPLE__) && defined(METAL_GPU)
-    gpu_avail = metal_md5salt_available();
+    gpu_avail = gpu_metal_available();
 #elif defined(CUDA_GPU)
     gpu_avail = cuda_md5salt_available();
 #elif defined(OPENCL_GPU)
-    gpu_avail = opencl_md5salt_available();
+    gpu_avail = gpu_opencl_available();
 #endif
     if (gpu_avail) gpujob_init(maxt + 16);
   }
+#endif
+#ifndef _WIN32
+  signal(SIGUSR1, sig_pause);
+  signal(SIGUSR2, sig_resume);
 #endif
   launch(ReportStats, NULL);
   for (y = 0; y < argc; y++) {

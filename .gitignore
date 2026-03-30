@@ -3,6 +3,7 @@
 *.a
 /mdxfind
 /mdsplit
+/mdxpause
 .claude/
 RCS/
 job_types.h
