@@ -167,9 +167,12 @@ int Neon;
 #define mysha1 SHA1
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.248 2026/03/31 02:47:42 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.249 2026/03/31 04:12:53 dlr Exp dlr $";
 /*
  * $Log: mdxfind.c,v $
+ * Revision 1.249  2026/03/31 04:12:53  dlr
+ * Add [GPU] markers for SHA256SALTPASS, SHA256PASSSALT, MD5CRYPT, MD5_MD5SALTMD5PASS in -h output
+ *
  * Revision 1.248  2026/03/31 02:47:42  dlr
  * Add e367 MD5(MD5(salt).MD5(pass)) GPU kernel (OpenCL + Metal). Precomputed
  * hex(MD5(salt)) from Typehashsalt packed into GPU salt buffer. Fixed salt buffer
@@ -38379,8 +38382,9 @@ int main(int argc, char **argv) {
 #ifdef GPU_ENABLED
               if (x == JOB_MD5SALT || x == JOB_MD5UCSALT ||
                   x == JOB_MD5revMD5SALT || x == JOB_MD5sub8_24SALT ||
-                  x == JOB_MD5SALTPASS ||
-                  x == JOB_MD5PASSSALT)
+                  x == JOB_MD5SALTPASS || x == JOB_MD5PASSSALT ||
+                  x == JOB_SHA256SALTPASS || x == JOB_SHA256PASSSALT ||
+                  x == JOB_MD5CRYPT || x == JOB_MD5_MD5SALTMD5PASS)
                 gpu = " [GPU]";
 #endif
               if (hci)
