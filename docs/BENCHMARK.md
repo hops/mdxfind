@@ -153,6 +153,14 @@ Expected finds: sm-testfull=1,000,000, sm-test50=500,583, sm-test10=100,203.
 | dev1 | Apple M1 CPU (8 cores) | 3.2 GHz | 1,000,000 | 8403s | 352B | 41.9M/s |
 | ubpower8 | POWER8 (80T) | 3.4 GHz | 1,000,000 | 12483s | 961B | 77.0M/s |
 
+### Salted MD5-MD5SALTMD5PASS (e367, mode 2811) — sm-salt2811 (1M hashes, 1M unique salts, rockyou.txt wordlist)
+
+Algorithm: `md5(md5($salt).md5($pass))` — compound salted type requiring three MD5 operations per candidate per salt.
+
+| Machine | CPU/GPU | Clock | Found | Time | Hash calcs | Rate |
+|---------|---------|-------|-------|------|-----------|------|
+| fpga | NVIDIA GTX 1080 OpenCL | -- | 1,000,000 | 1451s | 4,073B | 2.82G/s |
+
 The salted benchmark is dramatically more expensive than unsalted because each candidate must be tested against every unique salt. With 1M unique salts and 14.3M passwords, this requires hundreds of billions of hash computations.
 
 **Notes:**
