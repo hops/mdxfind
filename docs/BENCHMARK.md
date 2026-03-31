@@ -162,6 +162,7 @@ Algorithm: `md5(md5($salt).md5($pass))` — compound salted type requiring three
 | fpga | NVIDIA GTX 1080 OpenCL | -- | 1,000,000 | 1451s | 4,073B | 2.82G/s |
 | gp1 | AMD Radeon HD 7950 OpenCL | -- | 1,000,000 | 1977s | 3,790B | 1.92G/s |
 | hpi7 | NVIDIA GTX 960 OpenCL | -- | 1,000,000 | 5513s | 3,597B | 652.6M/s |
+| hpi7 | NVIDIA GTX 960 hashcat 6.2.6 (Pure Kernel) | -- | 1,000,000 | 9962s | -- | 76.4M/s |
 
 The salted benchmark is dramatically more expensive than unsalted because each candidate must be tested against every unique salt. With 1M unique salts and 14.3M passwords, this requires hundreds of billions of hash computations.
 
