@@ -545,6 +545,10 @@ static const struct {
     {"md5passsalt_batch",   {JOB_MD5PASSSALT, -1}},
     {"md5_iter_lc",         {JOB_MD5, -1}},
     {"md5_iter_uc",         {JOB_MD5UC, -1}},
+    {"sha256passsalt_batch", {JOB_SHA256PASSSALT, -1}},
+    {"sha256saltpass_batch", {JOB_SHA256SALTPASS, -1}},
+    {"md5_md5saltmd5pass_batch", {JOB_MD5_MD5SALTMD5PASS, -1}},
+    {"md5crypt_batch",       {JOB_MD5CRYPT, -1}},
     {NULL, {-1}}
 };
 #define KERN_ITER_IDX 2  /* index of md5salt_iter in kernel_map (for Maxiter override) */
@@ -612,10 +616,10 @@ static int init_device(int di, cl_device_id dev_id, const char *kernel_source) {
 
     /* Per-device dispatch buffers */
     d->b_hits = clCreateBuffer(d->ctx, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
-                               GPU_MAX_HITS * 7 * sizeof(uint32_t), NULL, &err);
+                               GPU_MAX_HITS * 11 * sizeof(uint32_t), NULL, &err);
     d->b_hit_count = clCreateBuffer(d->ctx, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
                                      sizeof(uint32_t), NULL, &err);
-    d->h_hits = (uint32_t *)malloc(GPU_MAX_HITS * 7 * sizeof(uint32_t));
+    d->h_hits = (uint32_t *)malloc(GPU_MAX_HITS * 11 * sizeof(uint32_t));
     d->b_params = dev_buf(d, sizeof(OCLParams), CL_MEM_READ_ONLY);
 
     /* Dummy overflow buffers (replaced when overflow is loaded) */
@@ -952,7 +956,7 @@ int gpu_opencl_set_compact_table(int dev_idx,
                   + hash_data_buf_size                      /* hash_data_buf */
                   + hash_data_count * sizeof(uint64_t)      /* hash_data_off */
                   + hash_data_count * sizeof(uint16_t)      /* hash_data_len */
-                  + GPU_MAX_HITS * 7 * sizeof(uint32_t)     /* hits buffer */
+                  + GPU_MAX_HITS * 11 * sizeof(uint32_t)     /* hits buffer */
                   + 512 * 256;                              /* hexhash buffer */
     cl_ulong gpu_mem = 0;
     clGetDeviceInfo(d->dev, CL_DEVICE_GLOBAL_MEM_SIZE, sizeof(gpu_mem), &gpu_mem, NULL);
@@ -1215,7 +1219,8 @@ uint32_t *gpu_opencl_dispatch_batch(int dev_idx,
     *nhits_out = (int)raw_nhits;
     if (raw_nhits > 0) {
         if (raw_nhits > GPU_MAX_HITS) raw_nhits = GPU_MAX_HITS;
-        int stride = (_max_iter > 1) ? 7 : 6;
+        int is_sha256 = (_gpu_op == JOB_SHA256PASSSALT || _gpu_op == JOB_SHA256SALTPASS);
+        int stride = is_sha256 ? 11 : (_max_iter > 1) ? 7 : 6;
         clEnqueueReadBuffer(d->queue, d->b_hits, CL_TRUE, 0, raw_nhits * stride * sizeof(uint32_t), d->h_hits, 0, NULL, NULL);
     }
 

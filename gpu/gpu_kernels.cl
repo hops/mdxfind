@@ -65,6 +65,69 @@ void md5_block(uint *h0, uint *h1, uint *h2, uint *h3, uint *M) {
     *h0 += a; *h1 += b; *h2 += c; *h3 += d;
 }
 
+/* ---- SHA256 block function ---- */
+__constant uint SHA256_K[64] = {
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+};
+
+#define S256_ROTR(x,n) rotate((x),(uint)(32-(n)))
+#define S256_CH(x,y,z)  ((x & y) ^ (~x & z))
+#define S256_MAJ(x,y,z) ((x & y) ^ (x & z) ^ (y & z))
+#define S256_EP0(x)  (S256_ROTR(x,2)  ^ S256_ROTR(x,13) ^ S256_ROTR(x,22))
+#define S256_EP1(x)  (S256_ROTR(x,6)  ^ S256_ROTR(x,11) ^ S256_ROTR(x,25))
+#define S256_SIG0(x) (S256_ROTR(x,7)  ^ S256_ROTR(x,18) ^ (x >> 3))
+#define S256_SIG1(x) (S256_ROTR(x,17) ^ S256_ROTR(x,19) ^ (x >> 10))
+
+/* SHA256 processes big-endian uint32 words. M[] must be pre-swapped by caller. */
+void sha256_block(uint *state, uint *M) {
+    uint W[64];
+    for (int i = 0; i < 16; i++) W[i] = M[i];
+    for (int i = 16; i < 64; i++)
+        W[i] = S256_SIG1(W[i-2]) + W[i-7] + S256_SIG0(W[i-15]) + W[i-16];
+
+    uint a = state[0], b = state[1], c = state[2], d = state[3];
+    uint e = state[4], f = state[5], g = state[6], h = state[7];
+
+    for (int i = 0; i < 64; i++) {
+        uint t1 = h + S256_EP1(e) + S256_CH(e,f,g) + SHA256_K[i] + W[i];
+        uint t2 = S256_EP0(a) + S256_MAJ(a,b,c);
+        h = g; g = f; f = e; e = d + t1;
+        d = c; c = b; b = a; a = t1 + t2;
+    }
+
+    state[0] += a; state[1] += b; state[2] += c; state[3] += d;
+    state[4] += e; state[5] += f; state[6] += g; state[7] += h;
+}
+
+/* Byte-swap a uint32 (for SHA256 big-endian <-> little-endian conversion) */
+uint bswap32(uint x) {
+    return ((x >> 24) & 0xff) | ((x >> 8) & 0xff00) |
+           ((x << 8) & 0xff0000) | ((x << 24) & 0xff000000u);
+}
+
+/* Copy bytes into a big-endian M[] array for SHA256.
+ * SHA256 M[] words are big-endian, so byte 0 goes into bits 31:24 of M[0]. */
+void S_copy_bytes(uint *M, int byte_off, __global const uchar *src, int nbytes) {
+    for (int i = 0; i < nbytes; i++) {
+        int wi = (byte_off + i) / 4;
+        int bi = 3 - ((byte_off + i) % 4);  /* big-endian: byte 0 = shift 24 */
+        M[wi] = (M[wi] & ~(0xffu << (bi * 8))) | ((uint)src[i] << (bi * 8));
+    }
+}
+
+void S_set_byte(uint *M, int byte_off, uchar val) {
+    int wi = byte_off / 4;
+    int bi = 3 - (byte_off % 4);
+    M[wi] = (M[wi] & ~(0xffu << (bi * 8))) | ((uint)val << (bi * 8));
+}
+
 ulong compact_mix(ulong k) { return k ^ (k >> 32); }
 
 int probe_compact(uint hx, uint hy, uint hz, uint hw,
@@ -610,6 +673,354 @@ __kernel void md5passsalt_batch(
             hits[base+2] = 1;
             hits[base+3] = hx; hits[base+4] = hy;
             hits[base+5] = hz; hits[base+6] = hw;
+            mem_fence(CLK_GLOBAL_MEM_FENCE);
+        }
+    }
+}
+
+/* ---- MD5(MD5(salt).MD5(pass)) kernel (e367) ---- */
+/* Salt buffer has hex(MD5(salt)) [32 bytes], hexhash buffer has hex(MD5(pass)) [32 bytes].
+ * Total input is always exactly 64 bytes → deterministic 2-block MD5. */
+__kernel void md5_md5saltmd5pass_batch(
+    __global const uchar *hexhashes, __global const ushort *hexlens,
+    __global const uchar *salts, __global const uint *salt_offsets, __global const ushort *salt_lens,
+    __global const uint *compact_fp, __global const uint *compact_idx,
+    __global const OCLParams *params_buf,
+    __global const uchar *hash_data_buf, __global const ulong *hash_data_off, __global const ushort *hash_data_len,
+    __global uint *hits, __global volatile uint *hit_count,
+    __global const ulong *overflow_keys, __global const uchar *overflow_hashes,
+    __global const uint *overflow_offsets, __global const ushort *overflow_lengths)
+{
+    OCLParams params = *params_buf;
+    uint tid = get_global_id(0);
+    uint word_idx = tid / params.num_salts;
+    uint salt_idx = params.salt_start + (tid % params.num_salts);
+    if (word_idx >= params.num_words) return;
+
+    /* Load hex(MD5(salt)) [32 bytes] into M[0..7] as LE uint32 words */
+    uint M[16];
+    { __global const uchar *sp = salts + salt_offsets[salt_idx];
+      for (int i = 0; i < 8; i++)
+        M[i] = (uint)sp[i*4] | ((uint)sp[i*4+1]<<8) | ((uint)sp[i*4+2]<<16) | ((uint)sp[i*4+3]<<24);
+    }
+
+    /* Load hex(MD5(pass)) [32 bytes] into M[8..15] */
+    __global const uint *pass_words = (__global const uint *)(hexhashes + word_idx * 256);
+    for (int i = 0; i < 8; i++) M[8 + i] = pass_words[i];
+
+    /* Block 1: MD5 of the 64 data bytes (no padding in this block) */
+    uint hx = 0x67452301, hy = 0xEFCDAB89, hz = 0x98BADCFE, hw = 0x10325476;
+    md5_block(&hx, &hy, &hz, &hw, M);
+
+    /* Block 2: padding only — 0x80 at byte 0, length 512 bits at M[14] */
+    for (int i = 0; i < 16; i++) M[i] = 0;
+    M[0] = 0x00000080u;
+    M[14] = 64 * 8;  /* 512 bits */
+    md5_block(&hx, &hy, &hz, &hw, M);
+
+    if (probe_compact(hx, hy, hz, hw, compact_fp, compact_idx,
+                      params.compact_mask, params.max_probe, params.hash_data_count,
+                      hash_data_buf, hash_data_off,
+                      overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
+        uint slot = atomic_add(hit_count, 1u);
+        if (slot < params.max_hits) {
+            uint base = slot * 6;
+            hits[base] = word_idx; hits[base+1] = salt_idx;
+            hits[base+2] = hx; hits[base+3] = hy;
+            hits[base+4] = hz; hits[base+5] = hw;
+            mem_fence(CLK_GLOBAL_MEM_FENCE);
+        }
+    }
+}
+
+/* ---- MD5CRYPT kernel (e511): $1$salt$hash, 1000 MD5 iterations ---- */
+/* Salt buffer contains "$1$salt$" from Typesalt. Kernel extracts raw salt. */
+
+/* Helper: build MD5 message block from a byte buffer, with padding */
+void md5_oneshot(const uchar *data, int len, uint *out) {
+    uint M[16];
+    out[0] = 0x67452301u; out[1] = 0xEFCDAB89u;
+    out[2] = 0x98BADCFEu; out[3] = 0x10325476u;
+
+    int pos = 0;
+    /* Process full 64-byte blocks */
+    while (pos + 64 <= len) {
+        for (int i = 0; i < 16; i++)
+            M[i] = (uint)data[pos+i*4] | ((uint)data[pos+i*4+1]<<8) |
+                   ((uint)data[pos+i*4+2]<<16) | ((uint)data[pos+i*4+3]<<24);
+        md5_block(&out[0], &out[1], &out[2], &out[3], M);
+        pos += 64;
+    }
+    /* Final block(s) with padding */
+    int rem = len - pos;
+    uchar pad[128];
+    for (int i = 0; i < 128; i++) pad[i] = 0;
+    for (int i = 0; i < rem; i++) pad[i] = data[pos + i];
+    pad[rem] = 0x80;
+    int blocks = (rem < 56) ? 1 : 2;
+    int lenoff = (blocks == 1) ? 56 : 120;
+    pad[lenoff] = (len * 8) & 0xff;
+    pad[lenoff+1] = ((len * 8) >> 8) & 0xff;
+    pad[lenoff+2] = ((len * 8) >> 16) & 0xff;
+    pad[lenoff+3] = ((len * 8) >> 24) & 0xff;
+    for (int b = 0; b < blocks; b++) {
+        for (int i = 0; i < 16; i++)
+            M[i] = (uint)pad[b*64+i*4] | ((uint)pad[b*64+i*4+1]<<8) |
+                   ((uint)pad[b*64+i*4+2]<<16) | ((uint)pad[b*64+i*4+3]<<24);
+        md5_block(&out[0], &out[1], &out[2], &out[3], M);
+    }
+}
+
+__kernel void md5crypt_batch(
+    __global const uchar *hexhashes, __global const ushort *hexlens,
+    __global const uchar *salts, __global const uint *salt_offsets, __global const ushort *salt_lens,
+    __global const uint *compact_fp, __global const uint *compact_idx,
+    __global const OCLParams *params_buf,
+    __global const uchar *hash_data_buf, __global const ulong *hash_data_off,
+    __global const ushort *hash_data_len,
+    __global uint *hits, __global volatile uint *hit_count,
+    __global const ulong *overflow_keys, __global const uchar *overflow_hashes,
+    __global const uint *overflow_offsets, __global const ushort *overflow_lengths)
+{
+    OCLParams params = *params_buf;
+    uint tid = get_global_id(0);
+    uint word_idx = tid / params.num_salts;
+    uint salt_idx = params.salt_start + (tid % params.num_salts);
+    if (word_idx >= params.num_words) return;
+
+    int plen = hexlens[word_idx];
+    __global const uchar *pass = hexhashes + word_idx * 256;
+    uint soff = salt_offsets[salt_idx];
+    int slen_full = salt_lens[salt_idx];
+
+    /* Salt buffer has "$1$salt$" — extract raw salt (skip "$1$", stop before trailing "$") */
+    __global const uchar *salt_raw = salts + soff + 3; /* skip "$1$" */
+    int saltlen = slen_full - 4; /* remove "$1$" prefix and trailing "$" */
+    if (saltlen < 0) saltlen = 0;
+    if (saltlen > 8) saltlen = 8;
+
+    /* Local buffers */
+    uchar buf[256]; /* working buffer for MD5 input */
+    uint digest[4]; /* current MD5 state */
+
+    /* Step 1: digest_b = MD5(password + salt + password) */
+    int blen = 0;
+    for (int i = 0; i < plen; i++) buf[blen++] = pass[i];
+    for (int i = 0; i < saltlen; i++) buf[blen++] = salt_raw[i];
+    for (int i = 0; i < plen; i++) buf[blen++] = pass[i];
+    md5_oneshot(buf, blen, digest);
+    uchar digest_b[16];
+    for (int i = 0; i < 4; i++) {
+        digest_b[i*4]   = digest[i] & 0xff;
+        digest_b[i*4+1] = (digest[i] >> 8) & 0xff;
+        digest_b[i*4+2] = (digest[i] >> 16) & 0xff;
+        digest_b[i*4+3] = (digest[i] >> 24) & 0xff;
+    }
+
+    /* Step 2: digest_a = MD5(password + "$1$" + salt + digest_b_chunks + bit_bytes) */
+    blen = 0;
+    for (int i = 0; i < plen; i++) buf[blen++] = pass[i];
+    buf[blen++] = '$'; buf[blen++] = '1'; buf[blen++] = '$';
+    for (int i = 0; i < saltlen; i++) buf[blen++] = salt_raw[i];
+    /* Append digest_b for password length bytes */
+    for (int x = plen; x > 0; x -= 16) {
+        int n = (x > 16) ? 16 : x;
+        for (int i = 0; i < n; i++) buf[blen++] = digest_b[i];
+    }
+    /* Bit-dependent bytes */
+    for (int x = plen; x != 0; x >>= 1)
+        buf[blen++] = (x & 1) ? 0 : pass[0];
+    md5_oneshot(buf, blen, digest);
+
+    /* Step 3: 1000 iterations */
+    uchar dig[16];
+    for (int i = 0; i < 4; i++) {
+        dig[i*4]   = digest[i] & 0xff;
+        dig[i*4+1] = (digest[i] >> 8) & 0xff;
+        dig[i*4+2] = (digest[i] >> 16) & 0xff;
+        dig[i*4+3] = (digest[i] >> 24) & 0xff;
+    }
+    for (int x = 0; x < 1000; x++) {
+        blen = 0;
+        if (x & 1) { for (int i = 0; i < plen; i++) buf[blen++] = pass[i]; }
+        else       { for (int i = 0; i < 16; i++) buf[blen++] = dig[i]; }
+        if (x % 3) { for (int i = 0; i < saltlen; i++) buf[blen++] = salt_raw[i]; }
+        if (x % 7) { for (int i = 0; i < plen; i++) buf[blen++] = pass[i]; }
+        if (x & 1) { for (int i = 0; i < 16; i++) buf[blen++] = dig[i]; }
+        else       { for (int i = 0; i < plen; i++) buf[blen++] = pass[i]; }
+        md5_oneshot(buf, blen, digest);
+        for (int i = 0; i < 4; i++) {
+            dig[i*4]   = digest[i] & 0xff;
+            dig[i*4+1] = (digest[i] >> 8) & 0xff;
+            dig[i*4+2] = (digest[i] >> 16) & 0xff;
+            dig[i*4+3] = (digest[i] >> 24) & 0xff;
+        }
+    }
+
+    /* Probe compact table with 16-byte binary result */
+    uint hx = digest[0], hy = digest[1], hz = digest[2], hw = digest[3];
+    if (probe_compact(hx, hy, hz, hw, compact_fp, compact_idx,
+                      params.compact_mask, params.max_probe, params.hash_data_count,
+                      hash_data_buf, hash_data_off,
+                      overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
+        uint slot = atomic_add(hit_count, 1u);
+        if (slot < params.max_hits) {
+            uint base = slot * 6;
+            hits[base] = word_idx; hits[base+1] = salt_idx;
+            hits[base+2] = hx; hits[base+3] = hy;
+            hits[base+4] = hz; hits[base+5] = hw;
+            mem_fence(CLK_GLOBAL_MEM_FENCE);
+        }
+    }
+}
+
+/* ---- SHA256(password + salt) kernel (e413) ---- */
+__kernel void sha256passsalt_batch(
+    __global const uchar *hexhashes, __global const ushort *hexlens,
+    __global const uchar *salts, __global const uint *salt_offsets, __global const ushort *salt_lens,
+    __global const uint *compact_fp, __global const uint *compact_idx,
+    __global const OCLParams *params_buf,
+    __global const uchar *hash_data_buf, __global const ulong *hash_data_off,
+    __global const ushort *hash_data_len,
+    __global uint *hits, __global volatile uint *hit_count,
+    __global const ulong *overflow_keys, __global const uchar *overflow_hashes,
+    __global const uint *overflow_offsets, __global const ushort *overflow_lengths)
+{
+    OCLParams params = *params_buf;
+    uint tid = get_global_id(0);
+    uint word_idx = tid / params.num_salts;
+    uint salt_idx = params.salt_start + (tid % params.num_salts);
+    if (word_idx >= params.num_words) return;
+
+    int plen = hexlens[word_idx];
+    __global const uchar *pass = hexhashes + word_idx * 256;
+    uint soff = salt_offsets[salt_idx];
+    int slen = salt_lens[salt_idx];
+    int total_len = plen + slen;
+
+    uint state[8] = { 0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+                      0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u };
+    { uint M[16];
+      for (int i = 0; i < 16; i++) M[i] = 0;
+
+      if (total_len <= 55) {
+        S_copy_bytes(M, 0, pass, plen);
+        S_copy_bytes(M, plen, salts + soff, slen);
+        S_set_byte(M, total_len, 0x80);
+        M[15] = total_len * 8;  /* big-endian length in bits */
+        sha256_block(state, M);
+      } else {
+        int pass_b1 = (plen < 64) ? plen : 64;
+        S_copy_bytes(M, 0, pass, pass_b1);
+        int salt_b1 = 64 - pass_b1;
+        if (salt_b1 > slen) salt_b1 = slen;
+        if (salt_b1 > 0)
+            S_copy_bytes(M, pass_b1, salts + soff, salt_b1);
+        if (total_len < 64)
+            S_set_byte(M, total_len, 0x80);
+        sha256_block(state, M);
+        for (int i = 0; i < 16; i++) M[i] = 0;
+        int pos2 = 0;
+        int pass_b2 = plen - pass_b1;
+        if (pass_b2 > 0) { S_copy_bytes(M, 0, pass + pass_b1, pass_b2); pos2 = pass_b2; }
+        int salt_b2 = slen - salt_b1;
+        if (salt_b2 > 0) { S_copy_bytes(M, pos2, salts + soff + salt_b1, salt_b2); pos2 += salt_b2; }
+        if (total_len >= 64)
+            S_set_byte(M, pos2, 0x80);
+        M[15] = total_len * 8;
+        sha256_block(state, M);
+      }
+    }
+
+    /* Byte-swap all 8 state words to match host's big-endian storage */
+    uint h[8];
+    for (int i = 0; i < 8; i++) h[i] = bswap32(state[i]);
+
+    if (probe_compact(h[0], h[1], h[2], h[3], compact_fp, compact_idx,
+                      params.compact_mask, params.max_probe, params.hash_data_count,
+                      hash_data_buf, hash_data_off,
+                      overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
+        uint slot = atomic_add(hit_count, 1u);
+        if (slot < params.max_hits) {
+            /* SHA256 hit: stride 11 = widx + sidx + iter + 8 hash words */
+            uint base = slot * 11;
+            hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
+            for (int i = 0; i < 8; i++) hits[base+3+i] = h[i];
+            mem_fence(CLK_GLOBAL_MEM_FENCE);
+        }
+    }
+}
+
+/* ---- SHA256(salt + password) kernel (e412) ---- */
+__kernel void sha256saltpass_batch(
+    __global const uchar *hexhashes, __global const ushort *hexlens,
+    __global const uchar *salts, __global const uint *salt_offsets, __global const ushort *salt_lens,
+    __global const uint *compact_fp, __global const uint *compact_idx,
+    __global const OCLParams *params_buf,
+    __global const uchar *hash_data_buf, __global const ulong *hash_data_off,
+    __global const ushort *hash_data_len,
+    __global uint *hits, __global volatile uint *hit_count,
+    __global const ulong *overflow_keys, __global const uchar *overflow_hashes,
+    __global const uint *overflow_offsets, __global const ushort *overflow_lengths)
+{
+    OCLParams params = *params_buf;
+    uint tid = get_global_id(0);
+    uint word_idx = tid / params.num_salts;
+    uint salt_idx = params.salt_start + (tid % params.num_salts);
+    if (word_idx >= params.num_words) return;
+
+    int plen = hexlens[word_idx];
+    __global const uchar *pass = hexhashes + word_idx * 256;
+    uint soff = salt_offsets[salt_idx];
+    int slen = salt_lens[salt_idx];
+    int total_len = slen + plen;
+
+    uint state[8] = { 0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+                      0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u };
+    { uint M[16];
+      for (int i = 0; i < 16; i++) M[i] = 0;
+
+      if (total_len <= 55) {
+        S_copy_bytes(M, 0, salts + soff, slen);
+        S_copy_bytes(M, slen, pass, plen);
+        S_set_byte(M, total_len, 0x80);
+        M[15] = total_len * 8;
+        sha256_block(state, M);
+      } else {
+        int salt_b1 = (slen < 64) ? slen : 64;
+        S_copy_bytes(M, 0, salts + soff, salt_b1);
+        int pass_b1 = 64 - salt_b1;
+        if (pass_b1 > plen) pass_b1 = plen;
+        if (pass_b1 > 0)
+            S_copy_bytes(M, salt_b1, pass, pass_b1);
+        if (total_len < 64)
+            S_set_byte(M, total_len, 0x80);
+        sha256_block(state, M);
+        for (int i = 0; i < 16; i++) M[i] = 0;
+        int pos2 = 0;
+        int salt_b2 = slen - salt_b1;
+        if (salt_b2 > 0) { S_copy_bytes(M, 0, salts + soff + salt_b1, salt_b2); pos2 = salt_b2; }
+        int pass_b2 = plen - pass_b1;
+        if (pass_b2 > 0) { S_copy_bytes(M, pos2, pass + pass_b1, pass_b2); pos2 += pass_b2; }
+        if (total_len >= 64)
+            S_set_byte(M, pos2, 0x80);
+        M[15] = total_len * 8;
+        sha256_block(state, M);
+      }
+    }
+
+    uint h[8];
+    for (int i = 0; i < 8; i++) h[i] = bswap32(state[i]);
+
+    if (probe_compact(h[0], h[1], h[2], h[3], compact_fp, compact_idx,
+                      params.compact_mask, params.max_probe, params.hash_data_count,
+                      hash_data_buf, hash_data_off,
+                      overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
+        uint slot = atomic_add(hit_count, 1u);
+        if (slot < params.max_hits) {
+            uint base = slot * 11;
+            hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
+            for (int i = 0; i < 8; i++) hits[base+3+i] = h[i];
             mem_fence(CLK_GLOBAL_MEM_FENCE);
         }
     }

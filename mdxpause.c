@@ -1,8 +1,8 @@
 /*
- * mdxpause.c — List and pause/resume mdxfind instances
+ * mdxpause.c --List and pause/resume mdxfind instances
  *
- * Usage: mdxpause pause    — list instances, select one to pause
- *        mdxpause resume   — list instances, select one to resume
+ * Usage: mdxpause pause    --list instances, select one to pause
+ *        mdxpause resume   --list instances, select one to resume
  *
  * Linux:   sends SIGUSR1 (pause) / SIGUSR2 (resume)
  * Windows: signals named events Global\mdxfind_pause_<pid> / _resume_<pid>
@@ -53,7 +53,7 @@ static int send_signal(DWORD pid, const char *action)
     snprintf(name, sizeof(name), "Global\\mdxfind_%s_%u", action, (unsigned)pid);
     h = OpenEvent(EVENT_MODIFY_STATE, FALSE, name);
     if (!h) {
-        fprintf(stderr, "  Cannot signal PID %u — not responding or no event\n", (unsigned)pid);
+        fprintf(stderr, "  Cannot signal PID %u --not responding or no event\n", (unsigned)pid);
         return 1;
     }
     SetEvent(h);

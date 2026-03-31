@@ -9,6 +9,7 @@ A reproducible benchmark suite is available for download from [www.mdxfind.com](
 | [rockyou.txt.gz](https://www.mdxfind.com/rockyou.txt.gz) | Rockyou wordlist (14.3M passwords) | 49MB |
 | [mdxfind-benchmark-full.zip](https://www.mdxfind.com/mdxfind-benchmark-full.zip) | Full hash test files (14.3M hashes each, unsalted + salted) | 1.7GB |
 | [mdxfind-benchmark-small.zip](https://www.mdxfind.com/mdxfind-benchmark-small.zip) | Small hash test files (1M hashes each, unsalted + salted) | 122MB |
+| [mdxfind-benchmark-2811.zip](https://www.mdxfind.com/mdxfind-benchmark-2811.zip) | Mode 2811 salted hash files (MyBB md5(md5($salt).md5($pass)), 5-char salts) | 374MB |
 
 ### Test files
 
@@ -62,6 +63,23 @@ To our knowledge, no other tool supports the reversed-MD5-salted variant (e541).
 | `sm-salt10.txt` | 1,000,000 | ~10% | First 1M lines |
 
 The reversed hashes simulate real-world conditions where only a fraction of the hash list is solvable with a given wordlist. The `test10.txt` scenario (10% solvable) is typical of working with large leaked hash collections.
+
+### Mode 2811 (MyBB) salted test files
+
+Hashcat mode 2811 / mdxfind type e367 (MD5-MD5SALTMD5PASS): `md5(md5($salt).md5($pass))` with 5-character random printable ASCII salts. Generated from rockyou.txt using `gen2811` (source in `bench/`).
+
+| File | Hashes | Solvable | Description |
+|------|--------|----------|-------------|
+| `salt2811.txt` | 14,341,564 | 100% | Full rockyou set, compound salted |
+| `sm-salt2811.txt` | 1,000,000 | 100% | First 1M lines (for small/ARM hosts) |
+
+```bash
+# Full 2811 benchmark
+time mdxfind -M 2811 -F salt2811.txt rockyou.txt > /dev/null
+
+# Small 2811 benchmark
+time mdxfind -M 2811 -F sm-salt2811.txt rockyou.txt > /dev/null
+```
 
 ### Running the benchmark
 

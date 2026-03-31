@@ -15,6 +15,7 @@
 #ifdef _WIN32
 #define stat _stat64
 #define fstat _fstat64
+#include <windows.h>
 #endif
 
 #ifndef _WIN32
@@ -166,9 +167,26 @@ int Neon;
 #define mysha1 SHA1
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.245 2026/03/30 02:34:48 dlr Exp $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.248 2026/03/31 02:47:42 dlr Exp dlr $";
 /*
  * $Log: mdxfind.c,v $
+ * Revision 1.248  2026/03/31 02:47:42  dlr
+ * Add e367 MD5(MD5(salt).MD5(pass)) GPU kernel (OpenCL + Metal). Precomputed
+ * hex(MD5(salt)) from Typehashsalt packed into GPU salt buffer. Fixed salt buffer
+ * sizing for hashsalt packing. GPU disabled for Maxiter>1 (no iteration support yet).
+ *
+ * Revision 1.247  2026/03/31 02:11:44  dlr
+ * Add Typehashsalt: precompute MD5(salt) hex once at load time for e367 family.
+ * Eliminates redundant MD5(salt) computation from inner word×salt loop for
+ * JOB_MD5_MD5SALTMD5PASS, JOB_SHA1_MD5_MD5SALTMD5PASS, JOB_SHA1_MD5_MD5SALTMD5PASS_SALT,
+ * JOB_SHA1_MD5PEPPER_MD5SALTMD5PASS. Only populated for active types that need it.
+ * Also fix MD5CRYPT bootstrap message (salts not hashes).
+ *
+ * Revision 1.246  2026/03/31 01:05:33  dlr
+ * MD5CRYPT: compact table loading with base64 decode, hybrid_check probe in procjob.
+ * SHA256PASSSALT/SALTPASS GPU kernels (OpenCL + Metal). Hit buffer overflow detection
+ * and CPU retry for all GPU types. GPU_MAX_HITS stride 11 for SHA256.
+ *
  * Revision 1.245  2026/03/30 02:34:48  dlr
  * Add YESCRYPT (e995, hashcat mode 67000): loader, procjob, -z bootstrap.
  * Widen Maphashcat struct from uint16 to uint32 to support modes > 65535.
@@ -1569,12 +1587,14 @@ struct RuleHist {
 char *Userid, *MD5_user;
 char *combo_pepper;
 Pvoid_t *Typesalt;
+Pvoid_t *Typehashsalt; /* parallel Judy: same key as Typesalt, value = ptr to precomputed hash of salt */
 int *Typesaltcnt;      /* max entries per Typesalt[type] */
 int *Typesaltbytes;    /* total salt string bytes per type */
 struct saltentry {
     char *salt;      /* points into thread-local saltpool (copy of Judy key) */
     Word_t *PV;      /* cached PV pointer — stable for Judy lifetime */
     int saltlen;     /* cached strlen */
+    char *hashsalt;  /* precomputed hex(MD5(salt)) from Typehashsalt, or NULL */
 };
 char **Typesalt2;
 void **Typeuser;
@@ -1723,6 +1743,69 @@ inline void fastcopy(void *dest, void *src, int len) {
 
 char phpitoa64[] = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 char b64[]       = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/* Reverse lookup for phpitoa64: char -> 0..63, or -1 if invalid */
+static signed char phpatoi64[256];
+static int phpatoi64_init = 0;
+static void init_phpatoi64(void) {
+    if (phpatoi64_init) return;
+    memset(phpatoi64, -1, sizeof(phpatoi64));
+    for (int i = 0; i < 64; i++)
+        phpatoi64[(unsigned char)phpitoa64[i]] = i;
+    phpatoi64_init = 1;
+}
+
+/* Decode MD5CRYPT base64 (22 chars) to 16 binary bytes.
+ * Byte ordering: [0,6,12] [1,7,13] [2,8,14] [3,9,15] [4,10,5] [11]
+ * Each 3-byte group encodes to 4 base64 chars; final 1-byte group to 2 chars.
+ * Returns 0 on success, -1 on invalid input. */
+static int md5crypt_b64decode(const char *b64str, unsigned char *out) {
+    init_phpatoi64();
+    unsigned int v;
+    int i;
+    /* 5 groups of (3 bytes -> 4 chars) */
+    static const int order[5][3] = {
+        {0,6,12}, {1,7,13}, {2,8,14}, {3,9,15}, {4,10,5}
+    };
+    const char *p = b64str;
+    for (i = 0; i < 5; i++) {
+        int c0 = phpatoi64[(unsigned char)*p++]; if (c0 < 0) return -1;
+        int c1 = phpatoi64[(unsigned char)*p++]; if (c1 < 0) return -1;
+        int c2 = phpatoi64[(unsigned char)*p++]; if (c2 < 0) return -1;
+        int c3 = phpatoi64[(unsigned char)*p++]; if (c3 < 0) return -1;
+        v = c0 | (c1 << 6) | (c2 << 12) | (c3 << 18);
+        out[order[i][2]] = v & 0xff;
+        out[order[i][1]] = (v >> 8) & 0xff;
+        out[order[i][0]] = (v >> 16) & 0xff;
+    }
+    /* Final group: 1 byte (h[11]) -> 2 chars */
+    { int c0 = phpatoi64[(unsigned char)*p++]; if (c0 < 0) return -1;
+      int c1 = phpatoi64[(unsigned char)*p++]; if (c1 < 0) return -1;
+      out[11] = c0 | (c1 << 6);
+    }
+    return 0;
+}
+
+/* Encode 16 binary bytes to MD5CRYPT base64 (22 chars + NUL).
+ * Inverse of md5crypt_b64decode. */
+void md5crypt_b64encode(const unsigned char *in, char *out) {
+    static const int order[5][3] = {
+        {0,6,12}, {1,7,13}, {2,8,14}, {3,9,15}, {4,10,5}
+    };
+    int j = 0;
+    for (int i = 0; i < 5; i++) {
+        unsigned int v = (in[order[i][0]] << 16) | (in[order[i][1]] << 8) | in[order[i][2]];
+        out[j++] = phpitoa64[v & 0x3f]; v >>= 6;
+        out[j++] = phpitoa64[v & 0x3f]; v >>= 6;
+        out[j++] = phpitoa64[v & 0x3f]; v >>= 6;
+        out[j++] = phpitoa64[v & 0x3f];
+    }
+    { unsigned int v = in[11];
+      out[j++] = phpitoa64[v & 0x3f]; v >>= 6;
+      out[j++] = phpitoa64[v & 0x3f];
+    }
+    out[j] = 0;
+}
 
 /* Encode 16-byte MD5 digest to 30-char Juniper NetScreen format.
  * Layout: 24 base64 data chars + 6 signature chars "nrcstn" at positions 0,6,12,17,23,29.
@@ -5683,7 +5766,7 @@ static unsigned short TypeOpts[JOB_DONE] = {
     [508] = TYPEOPT_NEEDSF,  /* MD5MD5PASSSHA1 */
     [509] = TYPEOPT_NEEDSF,  /* SHA1MD5MD5SHA1MD5SHA1SHA1MD5 */
     [510] = TYPEOPT_NEEDSF | TYPEOPT_NEEDUSER | TYPEOPT_USERJUDY,  /* SHA512SHA512RAWUSER */
-    [511] = TYPEOPT_NEEDSJ | TYPEOPT_NEEDSALT | TYPEOPT_SALTJUDY,  /* MD5CRYPT */
+    [511] = TYPEOPT_NEEDSF | TYPEOPT_NEEDSALT | TYPEOPT_SALTJUDY,  /* MD5CRYPT */
     [512] = TYPEOPT_NEEDSJ | TYPEOPT_NEEDSALT | TYPEOPT_SALTJUDY,  /* SHA256CRYPT */
     [513] = TYPEOPT_NEEDSJ | TYPEOPT_NEEDSALT | TYPEOPT_SALTJUDY,  /* SHA512CRYPT */
     [514] = TYPEOPT_NEEDSF | TYPEOPT_NEEDSALT | TYPEOPT_SALTJUDY,  /* SHA512SALTMD5 */
@@ -6365,13 +6448,40 @@ static lock *ServerState;
 unsigned long long Tothash, Totfound, Totrules;
 atomic_ullong *Totalfound[JOB_DONE], *RuleCnt;
 
-/* SIGUSR1 pauses, SIGUSR2 resumes */
+/* SIGUSR1 pauses, SIGUSR2 resumes (Unix); named events (Windows) */
 volatile int MDXpause = 0;
 volatile int MDXpaused_count = 0;
 volatile unsigned int MDXlowest_line = 0xFFFFFFFF;
 volatile char *MDXlowest_file = NULL;
+#ifndef _WIN32
 static void sig_pause(int sig) { (void)sig; MDXpause = 1; }
 static void sig_resume(int sig) { (void)sig; MDXpause = 0; }
+#else
+/* Windows: background thread waits on named events for pause/resume */
+static HANDLE win_pause_event, win_resume_event;
+static DWORD WINAPI win_pause_thread(LPVOID arg) {
+    HANDLE events[2];
+    (void)arg;
+    events[0] = win_pause_event;
+    events[1] = win_resume_event;
+    for (;;) {
+        DWORD rc = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+        if (rc == WAIT_OBJECT_0)        MDXpause = 1;
+        else if (rc == WAIT_OBJECT_0+1) MDXpause = 0;
+        else break;
+    }
+    return 0;
+}
+static void win_pause_init(void) {
+    char name[64];
+    snprintf(name, sizeof(name), "Global\\mdxfind_pause_%u", (unsigned)GetCurrentProcessId());
+    win_pause_event = CreateEvent(NULL, FALSE, FALSE, name);
+    snprintf(name, sizeof(name), "Global\\mdxfind_resume_%u", (unsigned)GetCurrentProcessId());
+    win_resume_event = CreateEvent(NULL, FALSE, FALSE, name);
+    if (win_pause_event && win_resume_event)
+        CreateThread(NULL, 0, win_pause_thread, NULL, 0, NULL);
+}
+#endif
 
 
 /* compact_resize: rebuild compact table at double the current size.
@@ -6895,7 +7005,7 @@ static inline int hash_exists(const unsigned char *hashbytes, int len) {
 /* hybrid_check: probe compact table + overflow JudyL.
  * Returns 1 if found, 0 if miss.
  * On hit, *out_len = stored hash byte length, *out_flagptr points to flags. */
-static inline int hybrid_check(const unsigned char *hashbytes, int len,
+int hybrid_check(const unsigned char *hashbytes, int len,
                                 int *out_len, unsigned short **out_flagptr) {
     uint64_t key;
     uint32_t fp;
@@ -8074,12 +8184,26 @@ int build_salt_snapshot(struct saltentry *snap, char *pool,
             snap[n].salt = p;
             snap[n].PV = lpv;
             snap[n].saltlen = slen;
+            snap[n].hashsalt = NULL;
             p += slen + 1;
             n++;
         }
         JSLN(lpv, judy, (unsigned char *)keybuf);
     }
     return n;
+}
+
+/* Populate hashsalt pointers in snapshot from Typehashsalt[job] Judy.
+ * Called after build_salt_snapshot for types that precompute MD5(salt). */
+void snapshot_attach_hashsalt(struct saltentry *snap, int nsalts,
+                              Pvoid_t hashsalt_judy) {
+    if (!hashsalt_judy) return;
+    for (int i = 0; i < nsalts; i++) {
+        Word_t *hpv;
+        JSLG(hpv, hashsalt_judy, (unsigned char *)snap[i].salt);
+        if (hpv && *hpv)
+            snap[i].hashsalt = (char *)(void *)*hpv;
+    }
 }
 
 #ifdef MDX_BIT32
@@ -10493,8 +10617,104 @@ release(FreeWaiting);
                 if (len > MAXLINE)
                   break;
                 if (!Typesalt[job->op]) break;
-                i = 3; /* magic length for $1$ */
+                if (!snap_valid) {
+                  nsalts_job = build_salt_snapshot(saltsnap, saltpool,
+                                  Typesalt[job->op], tsalt, Printall);
+                  snap_valid = 1;
+                  if (!nsalts_job) { Typedone[job->op] = 1; break; }
+                }
+                if (!nsalts_job) { Typedone[job->op] = 1; break; }
+#ifdef GPU_ENABLED
+                if (gpu_try_pack(&my_jobg, job, NULL, nsalts_job)) {
+                  hashcnt += (long long)nsalts_job * 1002;
+                  break;
+                }
+#endif
+                { int si;
+                for (si = 0; si < nsalts_job; si++) {
+                  /* Typesalt key is "$1$salt$" — extract salt after "$1$" */
+                  s2 = saltsnap[si].salt;  /* "$1$salt$" */
+                  s1 = s2 + 3;             /* "salt$" */
+                  for (x = 0; x < 8; x++)
+                    if (s1[x] == 0 || s1[x] == '$') break;
+                  saltlen = x;
+                  /* Compute MD5CRYPT(password, salt) — same algorithm as crypt_all */
+                  memmove(linebuf, cur, len);
+                  memmove(linebuf + len, s1, saltlen);
+                  memmove(linebuf + len + saltlen, cur, len);
+                  mymd5(linebuf, len + saltlen + len, curin.h);
+                  memmove(linebuf + len, s2, saltlen + 3);
+                  y = len + saltlen + 3;
+                  for (x = len; x > 0; x -= 16) {
+                    memmove(linebuf + y, curin.h, (x > 16) ? 16 : x);
+                    y += (x > 16) ? 16 : x;
+                  }
+                  for (x = len; x != 0; x >>= 1)
+                    linebuf[y++] = (x & 1) ? 0 : cur[0];
+                  mymd5(linebuf, y, curin.h);
+                  for (x = 0; x < 1000; x++) {
+                    y = 0;
+                    if (x & 1) { memmove(linebuf, cur, len); y = len; }
+                    else       { memmove(linebuf, curin.h, 16); y = 16; }
+                    if (x % 3) { memmove(linebuf + y, s1, saltlen); y += saltlen; }
+                    if (x % 7) { memmove(linebuf + y, cur, len); y += len; }
+                    if (x & 1) { memmove(linebuf + y, curin.h, 16); y += 16; }
+                    else       { memmove(linebuf + y, cur, len); y += len; }
+                    mymd5(linebuf, y, curin.h);
+                  }
+                  hashcnt += 1000 + 2;
+                  /* Probe compact table with 16-byte binary hash */
+                  { int match_len;
+                    unsigned short *match_flags;
+                    int hfound = hybrid_check(curin.h, 16, &match_len, &match_flags);
+                    if (Printall || (hfound && *match_flags != (unsigned short)job->op)) {
+                      if (hfound) *match_flags = job->op;
+                      PV_DEC(saltsnap[si].PV);
+                      if (!Printall && *saltsnap[si].PV == 0) {
+                        saltsnap[si] = saltsnap[--nsalts_job]; si--;
+                      }
+                      /* Reconstruct output: $1$salt$base64hash using original encoding */
+                      memmove(mdbuf, s2, saltlen + 4); /* "$1$salt$" */
+                      { unsigned int cas; int yy = saltlen + 4;
+                        cas = (curin.h[0] << 16) | (curin.h[6] << 8) | curin.h[12];
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f]; cas >>= 6;
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f]; cas >>= 6;
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f]; cas >>= 6;
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f];
+                        cas = (curin.h[1] << 16) | (curin.h[7] << 8) | curin.h[13];
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f]; cas >>= 6;
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f]; cas >>= 6;
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f]; cas >>= 6;
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f];
+                        cas = (curin.h[2] << 16) | (curin.h[8] << 8) | curin.h[14];
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f]; cas >>= 6;
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f]; cas >>= 6;
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f]; cas >>= 6;
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f];
+                        cas = (curin.h[3] << 16) | (curin.h[9] << 8) | curin.h[15];
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f]; cas >>= 6;
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f]; cas >>= 6;
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f]; cas >>= 6;
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f];
+                        cas = (curin.h[4] << 16) | (curin.h[10] << 8) | curin.h[5];
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f]; cas >>= 6;
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f]; cas >>= 6;
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f]; cas >>= 6;
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f];
+                        cas = curin.h[11];
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f]; cas >>= 6;
+                        mdbuf[yy++] = phpitoa64[cas & 0x3f];
+                        mdbuf[yy] = 0;
+                      }
+                      prfound(job, mdbuf);
+                    }
+                  }
+                }
+                if (!nsalts_job) Typedone[job->op] = 1;
+                }
+                break;
 
+              /* APR1 / AIXMD5 / JUNIPERIVE shared crypt path (JudyJ-based) */
 crypt_all:
                 if (!snap_valid) {
                   nsalts_job = build_salt_snapshot(saltsnap, saltpool,
@@ -14331,19 +14551,33 @@ morepep:
                 if (!snap_valid) {
                   nsalts_job = build_salt_snapshot(saltsnap, saltpool,
                                   Typesalt[job->op], tsalt, Printall);
+                  snapshot_attach_hashsalt(saltsnap, nsalts_job,
+                                  Typehashsalt[job->op]);
                   snap_valid = 1;
                   if (!nsalts_job) { Typedone[job->op] = 1; break; }
                 }
                 if (!nsalts_job) { Typedone[job->op] = 1; break; }
                 mymd5(cur, len, md5buf.h);
                 prmd5(md5buf.h, linebuf + 32, 32);
+#ifdef GPU_ENABLED
+                if (job->op == JOB_MD5_MD5SALTMD5PASS && Maxiter <= 1 &&
+                    gpu_try_pack(&my_jobg, job, &md5buf, nsalts_job)) {
+                  hashcnt += nsalts_job;
+                  break;
+                }
+#endif
                 { int si;
                 char passmd5 = linebuf[32];
                 for (si = 0; si < nsalts_job; si++) {
                   s1 = saltsnap[si].salt;
                   saltlen = saltsnap[si].saltlen;
-                  mymd5(s1, saltlen, curin.h);
-                  prmd5(curin.h, linebuf, 32);
+                  /* Use precomputed MD5(salt) hex if available */
+                  if (saltsnap[si].hashsalt) {
+                    memcpy(linebuf, saltsnap[si].hashsalt, 32);
+                  } else {
+                    mymd5(s1, saltlen, curin.h);
+                    prmd5(curin.h, linebuf, 32);
+                  }
                   linebuf[32] = passmd5;
                   mymd5(linebuf, 64, md5buf.h);
 		  i = 32;
@@ -24708,6 +24942,12 @@ sha1sha256:
                   if (!nsalts_job) { Typedone[job->op] = 1; break; }
                 }
                 if (!nsalts_job) { Typedone[job->op] = 1; break; }
+#ifdef GPU_ENABLED
+                if (gpu_try_pack(&my_jobg, job, NULL, nsalts_job)) {
+                  hashcnt += nsalts_job;
+                  break;
+                }
+#endif
                 { int si;
                 for (si = 0; si < nsalts_job; si++) {
                   saltlen = saltsnap[si].saltlen;
@@ -24748,6 +24988,12 @@ sha1sha256:
                   if (!nsalts_job) { Typedone[job->op] = 1; break; }
                 }
                 if (!nsalts_job) { Typedone[job->op] = 1; break; }
+#ifdef GPU_ENABLED
+                if (gpu_try_pack(&my_jobg, job, NULL, nsalts_job)) {
+                  hashcnt += nsalts_job;
+                  break;
+                }
+#endif
                 { int si;
                 for (si = 0; si < nsalts_job; si++) {
                   saltlen = saltsnap[si].saltlen;
@@ -33307,7 +33553,9 @@ void build_compact_table(void) {
   /* Only initialize GPU if at least one GPU-capable hash type is selected */
   { int need_gpu = 0;
     int gpu_ops[] = { JOB_MD5SALT, JOB_MD5UCSALT, JOB_MD5revMD5SALT, JOB_MD5sub8_24SALT,
-                      JOB_MD5SALTPASS, JOB_MD5PASSSALT, -1 };
+                      JOB_MD5SALTPASS, JOB_MD5PASSSALT,
+                      JOB_SHA256PASSSALT, JOB_SHA256SALTPASS,
+                      JOB_MD5CRYPT, JOB_MD5_MD5SALTMD5PASS, -1 };
     for (int gi = 0; gpu_ops[gi] >= 0; gi++) {
       Word_t grc;
       J1T(grc, Dohash, gpu_ops[gi]);
@@ -35987,16 +36235,27 @@ static void load_hash_file(gzFile gi, const char *filename, Pvoid_t *pDoload) {
         }
       }
     }
-    /* $1$ md5crypt */
+    /* $1$ md5crypt — decode base64 hash into compact table, salt into Typesalt */
     if (lf[JOB_MD5CRYPT] && line[0] == '$' && line[1] == '1' && line[2] == '$') {
-      for (x = 3; x < 34; x++) {
-        if ((signed char)line[x] <= ' ' || (signed char)line[x] > 'z') break;
+      /* Find salt: between $1$ and next $ */
+      char *salt_start = line + 3;
+      char *hash_start = NULL;
+      for (x = 0; x <= 8; x++) {
+        if (salt_start[x] == '$') { hash_start = salt_start + x + 1; break; }
+        if (salt_start[x] == 0) break;
       }
-      if (x >= 26) {
-        line[x] = 0;
-        JSLI(PV, JudyJ[JOB_MD5CRYPT], (unsigned char *)line);
-        Foundcnt[JOB_MD5CRYPT]++;
-        continue;
+      if (hash_start && strlen(hash_start) == 22) {
+        unsigned char hashbin[16];
+        if (md5crypt_b64decode(hash_start, hashbin) == 0 && inhashbuf) {
+          /* Store binary hash in compact table */
+          memcpy(inhashbuf + 2, hashbin, 16);
+          commit_compact(16);
+          /* Store salt prefix "$1$salt$" in Typesalt */
+          int prefixlen = (int)(hash_start - line);
+          Saltloaded[JOB_MD5CRYPT] += store_typesalt(JOB_MD5CRYPT, line, prefixlen);
+          Foundcnt[JOB_MD5CRYPT]++;
+          continue;
+        }
       }
     }
     /* $apr1$ */
@@ -37910,6 +38169,23 @@ static void load_hash_file(gzFile gi, const char *filename, Pvoid_t *pDoload) {
 	  for (x=0;  x < Dosaltcnt; x++) {
 	     JSLI(PV, Typesalt[Dosalt[x]],(unsigned char *)suffix);
 	     if (PV) { if ((*PV)++ == 0) {Saltloaded[Dosalt[x]]++;} }
+	     /* Precompute MD5(salt) hex for types that use it in the inner loop */
+	     { int dt = Dosalt[x];
+	       if (dt == JOB_MD5_MD5SALTMD5PASS || dt == JOB_SHA1_MD5_MD5SALTMD5PASS ||
+	           dt == JOB_SHA1_MD5_MD5SALTMD5PASS_SALT || dt == JOB_SHA1_MD5PEPPER_MD5SALTMD5PASS) {
+	         Word_t *HPV;
+	         JSLG(HPV, Typehashsalt[dt], (unsigned char *)suffix);
+	         if (!HPV) {
+	           unsigned char shash[16]; char *shex;
+	           mymd5((char *)suffix, mystrlen(suffix), shash);
+	           shex = (char *)malloc(33);
+	           prmd5(shash, shex, 32);
+	           shex[32] = 0;
+	           JSLI(HPV, Typehashsalt[dt], (unsigned char *)suffix);
+	           if (HPV) *HPV = (Word_t)(void *)shex;
+	         }
+	       }
+	     }
           }
 	  for (x=0;  x < Dousercnt; x++) {
 	     JSLI(PV, Typeuser[Douser[x]],(unsigned char *)suffix);
@@ -38058,6 +38334,7 @@ int main(int argc, char **argv) {
     }
   }
   Typesalt = (Pvoid_t *)malloc_lock(JOB_DONE * sizeof(Pvoid_t), "Typesalt");
+  Typehashsalt = (Pvoid_t *)malloc_lock(JOB_DONE * sizeof(Pvoid_t), "Typehashsalt");
   Typesaltcnt = (int *)malloc_lock(JOB_DONE * sizeof(int), "Typesaltcnt");
   Typesaltbytes = (int *)malloc_lock(JOB_DONE * sizeof(int), "Typesaltbytes");
   Typesalt2 = (char **)malloc_lock(JOB_DONE * sizeof(char *), "Typesalt2");
@@ -41911,23 +42188,17 @@ usage:
         }
       }
     }
-    /* MD5CRYPT: insert JudyJ[JOB_MD5CRYPT] entries into Typesalt */
+    /* MD5CRYPT: loader already populated compact table and Typesalt.
+     * Count salts and set up for -z mode if needed. */
     { long md5cryptcnt = 0;
       line[0] = 0;
-      JSLF(PV, JudyJ[JOB_MD5CRYPT], (unsigned char *)line);
-      while (PV) {
-        Word_t *SPV;
-        JSLI(SPV, Typesalt[JOB_MD5CRYPT], (unsigned char *)line);
-        if (SPV && *SPV == 0) *SPV = 1;
-        md5cryptcnt++;
-        JSLN(PV, JudyJ[JOB_MD5CRYPT], (unsigned char *)line);
-      }
-      JSLFA(RC, JudyJ[JOB_MD5CRYPT]);
+      JSLF(PV, Typesalt[JOB_MD5CRYPT], (unsigned char *)line);
+      while (PV) { md5cryptcnt++; JSLN(PV, Typesalt[JOB_MD5CRYPT], (unsigned char *)line); }
+      Numsalts += md5cryptcnt;
       if (md5cryptcnt) {
         if (Bcryptcnt == 0)
           Bcryptcnt = md5cryptcnt;
-        Numsalts += md5cryptcnt;
-        fprintf(stderr, "Searching through %ld unique MD5CRYPT hashes\n", md5cryptcnt);
+        fprintf(stderr, "%ld unique salts for MD5CRYPT\n", md5cryptcnt);
       } else {
         J1T(RC, Dohash, JOB_MD5CRYPT);
         if (RC && Printall) {
@@ -42348,6 +42619,8 @@ usage:
 #ifndef _WIN32
   signal(SIGUSR1, sig_pause);
   signal(SIGUSR2, sig_resume);
+#else
+  win_pause_init();
 #endif
   launch(ReportStats, NULL);
   for (y = 0; y < argc; y++) {

@@ -27,6 +27,11 @@
 #include "gpujob.h"
 #include "gpu_metal.h"
 
+extern "C" void mymd5(char *, int, unsigned char *);
+extern "C" void mysha256(char *, int, unsigned char *);
+extern "C" void snapshot_attach_hashsalt(struct saltentry *, int, void *);
+extern void **Typehashsalt;
+
 extern "C" {
 #include "yarn.h"
 #include <Judy.h>
@@ -56,6 +61,7 @@ struct saltentry {
     char *salt;
     unsigned long *PV;
     int saltlen;
+    char *hashsalt;
 };
 
 /* ---- GPU work queue ---- */
@@ -146,16 +152,18 @@ static int _gpujob_count = 1;
  * Returns number of packed salts. */
 static int gpu_pack_salts(struct saltentry *saltsnap, int nsalts,
                           char *salts_packed, uint32_t *soff, uint16_t *slen,
-                          int *pack_map) {
+                          int *pack_map, int use_hashsalt) {
     int packed = 0;
     uint32_t gsp = 0;
     for (int i = 0; i < nsalts; i++) {
         if (!Printall && *saltsnap[i].PV == 0) continue;
+        char *s = (use_hashsalt && saltsnap[i].hashsalt) ? saltsnap[i].hashsalt : saltsnap[i].salt;
+        int sl = (use_hashsalt && saltsnap[i].hashsalt) ? 32 : saltsnap[i].saltlen;
         soff[packed] = gsp;
-        slen[packed] = saltsnap[i].saltlen;
+        slen[packed] = sl;
         pack_map[packed] = i;
-        memcpy(salts_packed + gsp, saltsnap[i].salt, saltsnap[i].saltlen);
-        gsp += saltsnap[i].saltlen;
+        memcpy(salts_packed + gsp, s, sl);
+        gsp += sl;
         packed++;
     }
     return packed;
@@ -219,7 +227,10 @@ void gpujob(void *arg) {
     struct saltentry *saltsnap = (struct saltentry *)malloc(
         _max_salt_count * sizeof(struct saltentry));
     char *saltpool = (char *)malloc(_max_salt_bytes + 16);
-    char *salts_packed = (char *)malloc(_max_salt_bytes + 4096);
+    size_t sp_size = _max_salt_bytes + 4096;
+    if ((size_t)_max_salt_count * 32 + 4096 > sp_size)
+        sp_size = (size_t)_max_salt_count * 32 + 4096;
+    char *salts_packed = (char *)malloc(sp_size);
     uint32_t *soff = (uint32_t *)malloc(_max_salt_count * sizeof(uint32_t));
     uint16_t *slen = (uint16_t *)malloc(_max_salt_count * sizeof(uint16_t));
     int *pack_map = (int *)malloc(_max_salt_count * sizeof(int));
@@ -269,9 +280,13 @@ void gpujob(void *arg) {
             tsalt[0] = 0;
             nsalts = build_salt_snapshot(saltsnap, saltpool,
                             Typesalt[g->op], tsalt, Printall);
-            if (nsalts > 0)
+            if (nsalts > 0) {
+                int use_hs = (g->op == JOB_MD5_MD5SALTMD5PASS);
+                if (use_hs)
+                    snapshot_attach_hashsalt(saltsnap, nsalts, Typehashsalt[g->op]);
                 nsalts_packed = gpu_pack_salts(saltsnap, nsalts,
-                                               salts_packed, soff, slen, pack_map);
+                                               salts_packed, soff, slen, pack_map, use_hs);
+            }
             else
                 nsalts_packed = 0;
 #ifndef GPU_DOUBLE_BUFFER
@@ -309,29 +324,36 @@ void gpujob(void *arg) {
             g->count, &nhits);
 #endif
 
+        { int op_cat = gpu_op_category(g->op);
         if (hits && nhits > 0) {
             int stored = nhits > GPU_MAX_RETURN ? GPU_MAX_RETURN : nhits;
-            int hit_stride = (Maxiter > 1) ? 7 : 6;
+            int is_sha256 = (g->op == JOB_SHA256PASSSALT || g->op == JOB_SHA256SALTPASS);
+            int hit_stride = is_sha256 ? 11
+                : (Maxiter > 1 || op_cat == GPU_CAT_SALTPASS) ? 7 : 6;
+            int hash_words = is_sha256 ? 8 : 4;
+            int hexlen = is_sha256 ? 64 : 32;
+            int overflow = (nhits > GPU_MAX_RETURN);
+
+            /* On overflow, retry ALL words on CPU — partial hits may be stored */
 
             for (int h = 0; h < stored; h++) {
                 uint32_t *entry = hits + h * hit_stride;
                 int widx = entry[0];
                 int sidx = entry[1];
-                if (widx >= g->count || sidx >= nsalts_packed) continue;
+                if ((unsigned)widx >= (unsigned)g->count || sidx < 0) continue;
+                if (sidx >= nsalts_packed) continue;
+
+
 
                 int iter_num;
-                if (Maxiter > 1) {
+                if (hit_stride >= 7) {
                     iter_num = entry[2];
-                    curin.i[0] = entry[3];
-                    curin.i[1] = entry[4];
-                    curin.i[2] = entry[5];
-                    curin.i[3] = entry[6];
+                    for (int w = 0; w < hash_words; w++)
+                        curin.i[w] = entry[3 + w];
                 } else {
                     iter_num = 1;
-                    curin.i[0] = entry[2];
-                    curin.i[1] = entry[3];
-                    curin.i[2] = entry[4];
-                    curin.i[3] = entry[5];
+                    for (int w = 0; w < hash_words; w++)
+                        curin.i[w] = entry[2 + w];
                 }
 
                 char *pass = &g->passbuf[g->passoff[widx]];
@@ -346,12 +368,89 @@ void gpujob(void *arg) {
                 char *s1 = saltsnap[snap_idx].salt;
                 int saltlen = saltsnap[snap_idx].saltlen;
 
-                {
-                    if (checkhashsalt(&curin, 32, s1, saltlen, iter_num, &synthetic_job))
+                if (iter_num <= 1 && op_cat == GPU_CAT_SALTED) {
+                    if (checkhashkey(&curin, hexlen, s1, &synthetic_job))
+                        PV_DEC(saltsnap[snap_idx].PV);
+                } else {
+                    if (checkhashsalt(&curin, hexlen, s1, saltlen, iter_num, &synthetic_job))
                         PV_DEC(saltsnap[snap_idx].PV);
                 }
             }
+
+            /* Hit buffer overflow: reprocess words that may have lost hits on CPU */
+            if (overflow) {
+                for (int wi = 0; wi < g->count; wi++) {
+                    synthetic_job.clen = g->clen[wi];
+                    synthetic_job.Ruleindex = g->ruleindex[wi];
+                    for (int si = 0; si < nsalts_packed; si++) {
+                        int snap_idx = pack_map[si];
+                        char *s1 = saltsnap[snap_idx].salt;
+                        int saltlen = saltsnap[snap_idx].saltlen;
+                        char tmpbuf[1024];
+                        char *pass; int plen;
+
+                        switch (g->op) {
+                        case JOB_MD5SALT: case JOB_MD5UCSALT: case JOB_MD5revMD5SALT:
+                        case JOB_MD5sub8_24SALT:
+                            memcpy(tmpbuf, g->hexhash[wi], g->hexlen[wi]);
+                            memcpy(tmpbuf + g->hexlen[wi], s1, saltlen);
+                            mymd5(tmpbuf, g->hexlen[wi] + saltlen, curin.h);
+                            memcpy(synthetic_job.line, g->hexhash[wi], g->hexlen[wi]);
+                            synthetic_job.line[g->hexlen[wi]] = 0;
+                            synthetic_job.pass = synthetic_job.line;
+                            if (checkhashkey(&curin, 32, s1, &synthetic_job))
+                                PV_DEC(saltsnap[snap_idx].PV);
+                            break;
+                        case JOB_MD5SALTPASS:
+                            pass = &g->passbuf[g->passoff[wi]]; plen = g->passlen[wi];
+                            memcpy(tmpbuf, s1, saltlen);
+                            memcpy(tmpbuf + saltlen, pass, plen);
+                            mymd5(tmpbuf, saltlen + plen, curin.h);
+                            memcpy(synthetic_job.line, pass, plen);
+                            synthetic_job.line[plen] = 0;
+                            synthetic_job.pass = synthetic_job.line;
+                            if (checkhashsalt(&curin, 32, s1, saltlen, 1, &synthetic_job))
+                                PV_DEC(saltsnap[snap_idx].PV);
+                            break;
+                        case JOB_MD5PASSSALT:
+                            pass = &g->passbuf[g->passoff[wi]]; plen = g->passlen[wi];
+                            memcpy(tmpbuf, pass, plen);
+                            memcpy(tmpbuf + plen, s1, saltlen);
+                            mymd5(tmpbuf, plen + saltlen, curin.h);
+                            memcpy(synthetic_job.line, pass, plen);
+                            synthetic_job.line[plen] = 0;
+                            synthetic_job.pass = synthetic_job.line;
+                            if (checkhashsalt(&curin, 32, s1, saltlen, 1, &synthetic_job))
+                                PV_DEC(saltsnap[snap_idx].PV);
+                            break;
+                        case JOB_SHA256SALTPASS:
+                            pass = &g->passbuf[g->passoff[wi]]; plen = g->passlen[wi];
+                            memcpy(tmpbuf, s1, saltlen);
+                            memcpy(tmpbuf + saltlen, pass, plen);
+                            mysha256(tmpbuf, saltlen + plen, curin.h);
+                            memcpy(synthetic_job.line, pass, plen);
+                            synthetic_job.line[plen] = 0;
+                            synthetic_job.pass = synthetic_job.line;
+                            if (checkhashsalt(&curin, 64, s1, saltlen, 1, &synthetic_job))
+                                PV_DEC(saltsnap[snap_idx].PV);
+                            break;
+                        case JOB_SHA256PASSSALT:
+                            pass = &g->passbuf[g->passoff[wi]]; plen = g->passlen[wi];
+                            memcpy(tmpbuf, pass, plen);
+                            memcpy(tmpbuf + plen, s1, saltlen);
+                            mysha256(tmpbuf, plen + saltlen, curin.h);
+                            memcpy(synthetic_job.line, pass, plen);
+                            synthetic_job.line[plen] = 0;
+                            synthetic_job.pass = synthetic_job.line;
+                            if (checkhashsalt(&curin, 64, s1, saltlen, 1, &synthetic_job))
+                                PV_DEC(saltsnap[snap_idx].PV);
+                            break;
+                        }
+                    }
+                }
+            }
         }
+        } /* op_cat scope */
 
         hashcnt += (uint64_t)g->count * nsalts_packed * Maxiter;
 
@@ -577,9 +676,12 @@ int gpu_op_category(int op) {
     case JOB_MD5UCSALT:
     case JOB_MD5revMD5SALT:
     case JOB_MD5sub8_24SALT:
+    case JOB_MD5_MD5SALTMD5PASS:
         return GPU_CAT_SALTED;
     case JOB_MD5SALTPASS:
     case JOB_MD5PASSSALT:
+    case JOB_SHA256SALTPASS:
+    case JOB_SHA256PASSSALT:
         return GPU_CAT_SALTPASS;
     /* Bare MD5 iterated -- disabled pending larger batch sizes
     case JOB_MD5:
