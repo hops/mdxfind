@@ -10,6 +10,7 @@ A reproducible benchmark suite is available for download from [www.mdxfind.com](
 | [mdxfind-benchmark-full.zip](https://www.mdxfind.com/mdxfind-benchmark-full.zip) | Full hash test files (14.3M hashes each, unsalted + salted) | 1.7GB |
 | [mdxfind-benchmark-small.zip](https://www.mdxfind.com/mdxfind-benchmark-small.zip) | Small hash test files (1M hashes each, unsalted + salted) | 122MB |
 | [mdxfind-benchmark-2811.zip](https://www.mdxfind.com/mdxfind-benchmark-2811.zip) | Mode 2811 salted hash files (MyBB md5(md5($salt).md5($pass)), 5-char salts) | 374MB |
+| [mdxfind-benchmark-400.zip](https://www.mdxfind.com/mdxfind-benchmark-400.zip) | Mode 400 PHPBB3/phpass hash files (100K hashes, variable iterations) | 2.3MB |
 
 ### Test files
 
@@ -163,6 +164,17 @@ Algorithm: `md5(md5($salt).md5($pass))` — compound salted type requiring three
 | gp1 | AMD Radeon HD 7950 OpenCL | -- | 1,000,000 | 1977s | 3,790B | 1.92G/s |
 | hpi7 | NVIDIA GTX 960 OpenCL | -- | 1,000,000 | 5513s | 3,597B | 652.6M/s |
 | hpi7 | NVIDIA GTX 960 hashcat 6.2.6 (Pure Kernel) | -- | 1,000,000 | 9962s | -- | 76.4M/s |
+
+### PHPBB3/phpass (e455, mode 400) — sm-salt400 (100K hashes, rockyou.txt wordlist)
+
+Algorithm: iterated MD5 with per-hash salt and variable iteration count (512-2048 rounds). Due to the high per-hash computational cost, this benchmark uses 100,000 hashes rather than 1M.
+
+| Machine | CPU/GPU | Clock | Found | Time | Hash calcs | Rate |
+|---------|---------|-------|-------|------|-----------|------|
+| fpga | NVIDIA GTX 1080 OpenCL | -- | 100,000 | 191s | 3,082B | 16.8G/s |
+| hpi7 | NVIDIA GTX 960 OpenCL | -- | 100,000 | 810s | 2,723B | 3.37G/s |
+| fpga | NVIDIA GTX 1080 hashcat 6.2.6 (Pure Kernel) | -- | 100,000 | 1409s | -- | 8.10M/s |
+| hpi7 | NVIDIA GTX 960 hashcat 6.2.6 (Pure Kernel) | -- | 100,000 | 1837s | -- | 5.39M/s |
 
 The salted benchmark is dramatically more expensive than unsalted because each candidate must be tested against every unique salt. With 1M unique salts and 14.3M passwords, this requires hundreds of billions of hash computations.
 
