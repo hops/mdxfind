@@ -143,6 +143,7 @@ Expected finds: sm-testfull=1,000,000, sm-test50=500,583, sm-test10=100,203.
 |---------|---------|-------|-------|------|-----------|------|
 | -- | 12x NVIDIA RTX 4090 OpenCL (64 cores) | -- | 1,000,000 | 14s | 1,981B | 328G/s |
 | ioblade | 5-GPU OpenCL (2x AMD gfx1201 + RTX 4070 Ti + RTX 3080 + AMD iGPU) | -- | 1,000,000 | 31s | 1,831B | 62.9G/s |
+| mmt | NVIDIA RTX 4070 Ti SUPER OpenCL + CPU | -- | 1,000,000 | 45s | 353B | 8.03G/s |
 | dev3 | Apple M2 Max Metal (12 cores) | 3.5 GHz | 1,000,000 | 262s | 697B | 2.65G/s |
 | fpga | NVIDIA GTX 1080 OpenCL | -- | 1,000,000 | 376s | 353B | 940M/s |
 | hpi7 | NVIDIA GTX 960 OpenCL | -- | 1,000,000 | 902s | 353B | 391M/s |
@@ -152,7 +153,7 @@ Expected finds: sm-testfull=1,000,000, sm-test50=500,583, sm-test10=100,203.
 | mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | 1,000,000 | 1916s | 960B | 501M/s |
 | fpga | NVIDIA GTX 1080 hashcat (Pure Kernel) | -- | 1,000,000 | 4404s | -- | 175.9M/s |
 | dev3 | Apple M2 Max CPU (12 cores) | 3.5 GHz | 1,000,000 | 4532s | 352B | 77.7M/s |
-| gp | NVIDIA Tesla M2070 OpenCL | -- | 1,000,000 | 4730s | 2,818B | 595.7M/s |
+| gp | NVIDIA Tesla M2070 OpenCL + CPU | -- | 1,000,000 | 1616s | 353B | 219M/s |
 | dev1 | Apple M1 CPU (8 cores) | 3.2 GHz | 1,000,000 | 8403s | 352B | 41.9M/s |
 | ubpower8 | POWER8 (80T) | 3.4 GHz | 1,000,000 | 12483s | 961B | 77.0M/s |
 
@@ -167,10 +168,13 @@ hashcat -a 0 -m 2811 -o /dev/null --potfile-disable sm-salt2811.txt rockyou.txt
 
 | Machine | CPU/GPU | Clock | Found | Time | Hash calcs | Rate |
 |---------|---------|-------|-------|------|-----------|------|
+| mmt | NVIDIA RTX 4070 Ti SUPER OpenCL + CPU | -- | 1,000,000 | 83s | 503B | 6.25G/s |
 | dev3 | Apple M2 Max Metal + CPU | 3.5 GHz | 1,000,000 | 191s | 503B | 2.65G/s |
 | fpga | NVIDIA GTX 1080 OpenCL + CPU | -- | 1,000,000 | 447s | 503B | 1.13G/s |
 | gp1 | AMD Radeon HD 7950 OpenCL + CPU | -- | 1,000,000 | 458s | 503B | 1.10G/s |
 | dev1 | Apple M1 Metal + CPU | 3.2 GHz | 1,000,000 | 757s | 503B | 665M/s |
+| hpi7 | NVIDIA GTX 960 OpenCL + CPU | -- | 1,000,000 | 1140s | 503B | 441M/s |
+| gp | NVIDIA Tesla M2070 OpenCL + CPU | -- | 1,000,000 | 2713s | 503B | 186M/s |
 | fpga | NVIDIA GTX 1080 hashcat 6.2.6 (Pure Kernel) | -- | 1,000,000 | 7740s | -- | 169.1M/s |
 | hpi7 | NVIDIA GTX 960 hashcat 6.2.6 (Pure Kernel) | -- | 1,000,000 | 10020s | -- | 76.5M/s |
 
@@ -185,8 +189,10 @@ hashcat -a 0 -m 400 -o /dev/null --potfile-disable sm-salt400.txt sm-salt400.pas
 
 | Machine | CPU/GPU | Clock | Found | Time | Hash calcs | Rate |
 |---------|---------|-------|-------|------|-----------|------|
+| mmt | NVIDIA RTX 4070 Ti SUPER OpenCL + CPU | -- | 100,000 | 64s | 2,678B | 42.5G/s |
 | fpga | NVIDIA GTX 1080 OpenCL + CPU | -- | 100,000 | 180s | 2,676B | 14.9G/s |
 | dev3 | Apple M2 Max Metal + CPU | 3.5 GHz | 100,000 | 304s | 2,795B | 9.20G/s |
+| mmt | NVIDIA RTX 4070 Ti SUPER hashcat 6.2.6 (Pure Kernel) | -- | 100,000 | 324s | -- | 19.4M/s |
 | fpga | NVIDIA GTX 1080 hashcat 6.2.6 (Pure Kernel) | -- | 100,000 | 578s | -- | 5.98M/s |
 | hpi7 | NVIDIA GTX 960 OpenCL + CPU | -- | 100,000 | 738s | 2,675B | 3.63G/s |
 | dev1 | Apple M1 Metal + CPU | 3.2 GHz | 100,000 | 1196s | 2,792B | 2.33G/s |
