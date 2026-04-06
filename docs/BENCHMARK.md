@@ -146,15 +146,15 @@ Expected finds: sm-testfull=1,000,000, sm-test50=500,583, sm-test10=100,203.
 | mmt | NVIDIA RTX 4070 Ti SUPER OpenCL + CPU | -- | 1,000,000 | 45s | 353B | 8.03G/s |
 | dev3 | Apple M2 Max Metal (12 cores) | 3.5 GHz | 1,000,000 | 262s | 697B | 2.65G/s |
 | fpga | NVIDIA GTX 1080 OpenCL | -- | 1,000,000 | 376s | 353B | 940M/s |
+| gp1 | AMD Radeon HD 7950 OpenCL + CPU | -- | 1,000,000 | 603s | 353B | 586M/s |
+| mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | 1,000,000 | 686s | 351B | 513M/s |
 | hpi7 | NVIDIA GTX 960 OpenCL | -- | 1,000,000 | 902s | 353B | 391M/s |
 | -- | 12x NVIDIA RTX 4090 hashcat 7.1 (Pure Kernel) | -- | 1,000,000 | 996s | 8,461B | 14.3G/s |
 | dev1 | Apple M1 Metal (8 cores) | 3.2 GHz | 1,000,000 | 1035s | 695B | 672M/s |
-| gp1 | AMD Radeon HD 7950 OpenCL + CPU | -- | 1,000,000 | 603s | 353B | 586M/s |
-| mmt | NVIDIA RTX 4070 Ti SUPER hashcat 6.2.6 (Pure Kernel) | -- | 1,000,000 | 1661s | -- | 1.53G/s |
-| mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | 1,000,000 | 1916s | 960B | 501M/s |
-| fpga | NVIDIA GTX 1080 hashcat (Pure Kernel) | -- | 1,000,000 | 4404s | -- | 175.9M/s |
-| dev3 | Apple M2 Max CPU (12 cores) | 3.5 GHz | 1,000,000 | 4532s | 352B | 77.7M/s |
 | gp | NVIDIA Tesla M2070 OpenCL + CPU | -- | 1,000,000 | 1616s | 353B | 219M/s |
+| mmt | NVIDIA RTX 4070 Ti SUPER hashcat 6.2.6 (Pure Kernel) | -- | 1,000,000 | 1661s | -- | 1.53G/s |
+| dev3 | Apple M2 Max CPU (12 cores) | 3.5 GHz | 1,000,000 | 2635s | 351B | 133M/s |
+| fpga | NVIDIA GTX 1080 hashcat (Pure Kernel) | -- | 1,000,000 | 4404s | -- | 175.9M/s |
 | dev1 | Apple M1 CPU (8 cores) | 3.2 GHz | 1,000,000 | 8403s | 352B | 41.9M/s |
 | ubpower8 | POWER8 (80T) | 3.4 GHz | 1,000,000 | 12483s | 961B | 77.0M/s |
 
