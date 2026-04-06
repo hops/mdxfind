@@ -69,6 +69,8 @@ The reversed hashes simulate real-world conditions where only a fraction of the 
 
 Hashcat mode 2811 / mdxfind type e367 (MD5-MD5SALTMD5PASS): `md5(md5($salt).md5($pass))` with 5-character random printable ASCII salts. Generated from rockyou.txt using `gen2811` (source in `bench/`).
 
+**Note:** The 2811.zip was updated 2026-04-05 — the previous version was missing the first salted password from rockyou.txt.
+
 | File | Hashes | Solvable | Description |
 |------|--------|----------|-------------|
 | `salt2811.txt` | 14,341,564 | 100% | Full rockyou set, compound salted |
@@ -146,7 +148,7 @@ Expected finds: sm-testfull=1,000,000, sm-test50=500,583, sm-test10=100,203.
 | hpi7 | NVIDIA GTX 960 OpenCL | -- | 1,000,000 | 902s | 353B | 391M/s |
 | -- | 12x NVIDIA RTX 4090 hashcat 7.1 (Pure Kernel) | -- | 1,000,000 | 996s | 8,461B | 14.3G/s |
 | dev1 | Apple M1 Metal (8 cores) | 3.2 GHz | 1,000,000 | 1035s | 695B | 672M/s |
-| gp2 | AMD Radeon HD 7950 (Tahiti) OpenCL | -- | 1,000,000 | 1516s | 2,503B | 1.65G/s |
+| gp1 | AMD Radeon HD 7950 OpenCL + CPU | -- | 1,000,000 | 603s | 353B | 586M/s |
 | mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | 1,000,000 | 1916s | 960B | 501M/s |
 | fpga | NVIDIA GTX 1080 hashcat (Pure Kernel) | -- | 1,000,000 | 4404s | -- | 175.9M/s |
 | dev3 | Apple M2 Max CPU (12 cores) | 3.5 GHz | 1,000,000 | 4532s | 352B | 77.7M/s |
@@ -158,16 +160,28 @@ Expected finds: sm-testfull=1,000,000, sm-test50=500,583, sm-test10=100,203.
 
 Algorithm: `md5(md5($salt).md5($pass))` — compound salted type requiring three MD5 operations per candidate per salt.
 
+```bash
+mdxfind -M 2811 -F bench/sm-salt2811.txt rockyou.txt > /dev/null
+hashcat -a 0 -m 2811 -o /dev/null --potfile-disable sm-salt2811.txt rockyou.txt
+```
+
 | Machine | CPU/GPU | Clock | Found | Time | Hash calcs | Rate |
 |---------|---------|-------|-------|------|-----------|------|
-| fpga | NVIDIA GTX 1080 OpenCL | -- | 1,000,000 | 1451s | 4,073B | 2.82G/s |
-| gp1 | AMD Radeon HD 7950 OpenCL | -- | 1,000,000 | 1977s | 3,790B | 1.92G/s |
-| hpi7 | NVIDIA GTX 960 OpenCL | -- | 1,000,000 | 5513s | 3,597B | 652.6M/s |
-| hpi7 | NVIDIA GTX 960 hashcat 6.2.6 (Pure Kernel) | -- | 1,000,000 | 9962s | -- | 76.4M/s |
+| dev3 | Apple M2 Max Metal + CPU | 3.5 GHz | 1,000,000 | 191s | 503B | 2.65G/s |
+| fpga | NVIDIA GTX 1080 OpenCL + CPU | -- | 1,000,000 | 447s | 503B | 1.13G/s |
+| gp1 | AMD Radeon HD 7950 OpenCL + CPU | -- | 1,000,000 | 458s | 503B | 1.10G/s |
+| dev1 | Apple M1 Metal + CPU | 3.2 GHz | 1,000,000 | 757s | 503B | 665M/s |
+| fpga | NVIDIA GTX 1080 hashcat 6.2.6 (Pure Kernel) | -- | 1,000,000 | 7740s | -- | 169.1M/s |
+| hpi7 | NVIDIA GTX 960 hashcat 6.2.6 (Pure Kernel) | -- | 1,000,000 | 10020s | -- | 76.5M/s |
 
 ### PHPBB3/phpass (e455, mode 400) — sm-salt400 (100K hashes, 100K passwords)
 
 Algorithm: iterated MD5 with per-hash salt and variable iteration count (512-2048 rounds). Due to the high per-hash computational cost, this benchmark uses 100,000 hashes and the first 100,000 passwords from rockyou.txt rather than the full 14.3M wordlist.
+
+```bash
+mdxfind -M 400 -F bench/sm-salt400.txt bench/sm-salt400.pass > /dev/null
+hashcat -a 0 -m 400 -o /dev/null --potfile-disable sm-salt400.txt sm-salt400.pass
+```
 
 | Machine | CPU/GPU | Clock | Found | Time | Hash calcs | Rate |
 |---------|---------|-------|-------|------|-----------|------|
