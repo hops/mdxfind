@@ -155,7 +155,8 @@ Expected finds: sm-testfull=1,000,000, sm-test50=500,583, sm-test10=100,203.
 | mmt | NVIDIA RTX 4070 Ti SUPER hashcat 6.2.6 (Pure Kernel) | -- | 1,000,000 | 1661s | -- | 1.53G/s |
 | dev3 | Apple M2 Max CPU (12 cores) | 3.5 GHz | 1,000,000 | 2635s | 351B | 133M/s |
 | fpga | NVIDIA GTX 1080 hashcat (Pure Kernel) | -- | 1,000,000 | 4404s | -- | 175.9M/s |
-| dev1 | Apple M1 CPU (8 cores) | 3.2 GHz | 1,000,000 | 8403s | 352B | 41.9M/s |
+| dev1 | Apple M1 CPU (8 cores) | 3.2 GHz | 1,000,000 | 4859s | 351B | 72.3M/s |
+| hpi7 | NVIDIA GTX 960 hashcat 6.2.6 (Pure Kernel) | -- | 1,000,000 | 8191s | -- | 60.8M/s |
 | ubpower8 | POWER8 (80T) | 3.4 GHz | 1,000,000 | 12483s | 961B | 77.0M/s |
 
 ### Salted MD5-MD5SALTMD5PASS (e367, mode 2811) — sm-salt2811 (1M hashes, 1M unique salts, rockyou.txt wordlist)
