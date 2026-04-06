@@ -150,6 +150,7 @@ Expected finds: sm-testfull=1,000,000, sm-test50=500,583, sm-test10=100,203.
 | -- | 12x NVIDIA RTX 4090 hashcat 7.1 (Pure Kernel) | -- | 1,000,000 | 996s | 8,461B | 14.3G/s |
 | dev1 | Apple M1 Metal (8 cores) | 3.2 GHz | 1,000,000 | 1035s | 695B | 672M/s |
 | gp1 | AMD Radeon HD 7950 OpenCL + CPU | -- | 1,000,000 | 603s | 353B | 586M/s |
+| mmt | NVIDIA RTX 4070 Ti SUPER hashcat 6.2.6 (Pure Kernel) | -- | 1,000,000 | 1661s | -- | 1.53G/s |
 | mmt | 2x Xeon E5-2697 v4 (72T) | 2.3 GHz | 1,000,000 | 1916s | 960B | 501M/s |
 | fpga | NVIDIA GTX 1080 hashcat (Pure Kernel) | -- | 1,000,000 | 4404s | -- | 175.9M/s |
 | dev3 | Apple M2 Max CPU (12 cores) | 3.5 GHz | 1,000,000 | 4532s | 352B | 77.7M/s |
@@ -174,6 +175,7 @@ hashcat -a 0 -m 2811 -o /dev/null --potfile-disable sm-salt2811.txt rockyou.txt
 | gp1 | AMD Radeon HD 7950 OpenCL + CPU | -- | 1,000,000 | 458s | 503B | 1.10G/s |
 | dev1 | Apple M1 Metal + CPU | 3.2 GHz | 1,000,000 | 757s | 503B | 665M/s |
 | hpi7 | NVIDIA GTX 960 OpenCL + CPU | -- | 1,000,000 | 1140s | 503B | 441M/s |
+| mmt | NVIDIA RTX 4070 Ti SUPER hashcat 6.2.6 (Pure Kernel) | -- | 1,000,000 | 2131s | -- | 2.03G/s |
 | gp | NVIDIA Tesla M2070 OpenCL + CPU | -- | 1,000,000 | 2713s | 503B | 186M/s |
 | fpga | NVIDIA GTX 1080 hashcat 6.2.6 (Pure Kernel) | -- | 1,000,000 | 7740s | -- | 169.1M/s |
 | hpi7 | NVIDIA GTX 960 hashcat 6.2.6 (Pure Kernel) | -- | 1,000,000 | 10020s | -- | 76.5M/s |
