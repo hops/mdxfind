@@ -11,6 +11,7 @@ A reproducible benchmark suite is available for download from [www.mdxfind.com](
 | [mdxfind-benchmark-small.zip](https://www.mdxfind.com/mdxfind-benchmark-small.zip) | Small hash test files (1M hashes each, unsalted + salted) | 122MB |
 | [mdxfind-benchmark-2811.zip](https://www.mdxfind.com/mdxfind-benchmark-2811.zip) | Mode 2811 salted hash files (MyBB md5(md5($salt).md5($pass)), 5-char salts) | 374MB |
 | [mdxfind-benchmark-400.zip](https://www.mdxfind.com/mdxfind-benchmark-400.zip) | Mode 400 PHPBB3/phpass hash files (100K hashes, variable iterations) | 2.3MB |
+| [mdxfind-benchmark-1500.zip](https://www.mdxfind.com/mdxfind-benchmark-1500.zip) | Mode 1500 DESCRYPT hash files (1M hashes, 4096 salts) | 15MB |
 
 ### Test files
 
@@ -212,11 +213,11 @@ hashcat -a 0 -m 1500 -o /dev/null --potfile-disable sm-salt1500.txt sm-salt1500.
 
 | Machine | CPU/GPU | Clock | Found | Time | Hash calcs | Rate |
 |---------|---------|-------|-------|------|-----------|------|
-| mmt | NVIDIA RTX 4070 Ti SUPER OpenCL + CPU | -- | 1,000,000 | 11s | 4B | 425M/s |
+| mmt | NVIDIA RTX 4070 Ti SUPER OpenCL + CPU | -- | 1,000,000 | 9s | 4B | 453M/s |
 | fpga | NVIDIA GTX 1080 OpenCL + CPU | -- | 1,000,000 | 26s | 4B | 170M/s |
 | dev3 | Apple M2 Max Metal + CPU | 3.5 GHz | 1,000,000 | 54s | 4B | 75.9M/s |
 | fpga | NVIDIA GTX 1080 hashcat 6.2.6 (Pure Kernel) | -- | 1,000,000 | 84s | -- | 34.0M/s |
-| hpi7 | NVIDIA GTX 960 OpenCL + CPU | -- | 1,000,000 | 103s | 4B | 40.4M/s |
+| hpi7 | NVIDIA GTX 960 OpenCL + CPU | -- | 1,000,000 | 103s | 4B | 40.6M/s |
 | mmt | NVIDIA RTX 4070 Ti SUPER hashcat 6.2.6 (Pure Kernel) | -- | 1,000,000 | 135s | -- | 126.6M/s |
 | dev1 | Apple M1 Metal + CPU | 3.2 GHz | 1,000,000 | 141s | 4B | 29.0M/s |
 | hpi7 | NVIDIA GTX 960 hashcat 6.2.6 (Pure Kernel) | -- | 1,000,000 | 221s | -- | 4.36M/s |
