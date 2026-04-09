@@ -203,6 +203,22 @@ static char *load_kernel_file(const char *path) {
 #include "gpu_md5mask_str.h"
 #include "gpu_descrypt_str.h"
 #include "gpu_md5unsalted_str.h"
+#include "gpu_md4unsalted_str.h"
+#include "gpu_sha1unsalted_str.h"
+#include "gpu_sha256unsalted_str.h"
+#include "gpu_sha512unsalted_str.h"
+#include "gpu_wrlunsalted_str.h"
+#include "gpu_md6256unsalted_str.h"
+#include "gpu_keccakunsalted_str.h"
+/* HMAC-SHA256 kernels are in gpu_sha256.cl (FAM_SHA256) */
+#include "gpu_hmac_sha512_str.h"
+#include "gpu_mysql3unsalted_str.h"
+#include "gpu_hmac_rmd160_str.h"
+#include "gpu_hmac_rmd320_str.h"
+#include "gpu_hmac_blake2s_str.h"
+#include "gpu_streebog_str.h"
+#include "gpu_sha512crypt_str.h"
+#include "gpu_sha256crypt_str.h"
 /* Old monolithic kernel source removed — per-family compilation now.
  * See gpu_common_str.h + gpu_*_str.h
  *
@@ -275,6 +291,21 @@ static const char *family_source[FAM_COUNT] = {
     [FAM_MD5MASK]            = gpu_md5mask_str,
     [FAM_DESCRYPT]           = gpu_descrypt_str,
     [FAM_MD5UNSALTED]        = gpu_md5unsalted_str,
+    [FAM_MD4UNSALTED]        = gpu_md4unsalted_str,
+    [FAM_SHA1UNSALTED]       = gpu_sha1unsalted_str,
+    [FAM_SHA256UNSALTED]     = gpu_sha256unsalted_str,
+    [FAM_SHA512UNSALTED]     = gpu_sha512unsalted_str,
+    [FAM_WRLUNSALTED]        = gpu_wrlunsalted_str,
+    [FAM_MD6256UNSALTED]     = gpu_md6256unsalted_str,
+    [FAM_KECCAKUNSALTED]     = gpu_keccakunsalted_str,
+    [FAM_HMAC_SHA512]        = gpu_hmac_sha512_str,
+    [FAM_MYSQL3UNSALTED]     = gpu_mysql3unsalted_str,
+    [FAM_HMAC_RMD160]       = gpu_hmac_rmd160_str,
+    [FAM_HMAC_RMD320]       = gpu_hmac_rmd320_str,
+    [FAM_HMAC_BLAKE2S]      = gpu_hmac_blake2s_str,
+    [FAM_STREEBOG]          = gpu_streebog_str,
+    [FAM_SHA512CRYPT]       = gpu_sha512crypt_str,
+    [FAM_SHA256CRYPT]       = gpu_sha256crypt_str,
 };
 
 /* Kernel-to-op mapping table. Each entry: kernel function name, ops it serves, family.
@@ -302,6 +333,53 @@ static const struct {
     {"md5crypt_batch",       {JOB_MD5CRYPT, -1}, FAM_MD5CRYPT},
     {"descrypt_batch",       {JOB_DESCRYPT, -1}, FAM_DESCRYPT},
     {"md5_unsalted_batch",   {JOB_MD5, -1}, FAM_MD5UNSALTED},
+    {"md4_unsalted_batch",   {JOB_MD4, -1}, FAM_MD4UNSALTED},
+    {"md4utf16_unsalted_batch", {JOB_NTLMH, -1}, FAM_MD4UNSALTED},
+    {"sha1_unsalted_batch",  {JOB_SHA1, -1}, FAM_SHA1UNSALTED},
+    {"sha256_unsalted_batch", {JOB_SHA256, -1}, FAM_SHA256UNSALTED},
+    {"sha224_unsalted_batch", {JOB_SHA224, -1}, FAM_SHA256UNSALTED},
+    {"sha256raw_unsalted_batch", {JOB_SHA256RAW, -1}, FAM_SHA256UNSALTED},
+    {"sha512_unsalted_batch", {JOB_SHA512, -1}, FAM_SHA512UNSALTED},
+    {"sha384_unsalted_batch", {JOB_SHA384, -1}, FAM_SHA512UNSALTED},
+    {"wrl_unsalted_batch",   {JOB_WRL, -1}, FAM_WRLUNSALTED},
+    {"md6_256_unsalted_batch", {JOB_MD6256, -1}, FAM_MD6256UNSALTED},
+    {"keccak224_unsalted_batch", {JOB_KECCAK224, -1}, FAM_KECCAKUNSALTED},
+    {"keccak256_unsalted_batch", {JOB_KECCAK256, -1}, FAM_KECCAKUNSALTED},
+    {"keccak384_unsalted_batch", {JOB_KECCAK384, -1}, FAM_KECCAKUNSALTED},
+    {"keccak512_unsalted_batch", {JOB_KECCAK512, -1}, FAM_KECCAKUNSALTED},
+    {"sha3_224_unsalted_batch",  {JOB_SHA3_224, -1}, FAM_KECCAKUNSALTED},
+    {"sha3_256_unsalted_batch",  {JOB_SHA3_256, -1}, FAM_KECCAKUNSALTED},
+    {"sha3_384_unsalted_batch",  {JOB_SHA3_384, -1}, FAM_KECCAKUNSALTED},
+    {"sha3_512_unsalted_batch",  {JOB_SHA3_512, -1}, FAM_KECCAKUNSALTED},
+    {"hmac_sha256_ksalt_batch",  {JOB_HMAC_SHA256, -1}, FAM_SHA256},
+    {"hmac_sha256_kpass_batch",  {JOB_HMAC_SHA256_KPASS, -1}, FAM_SHA256},
+    {"hmac_sha224_ksalt_batch",  {JOB_HMAC_SHA224, -1}, FAM_SHA256},
+    {"hmac_sha224_kpass_batch",  {JOB_HMAC_SHA224_KPASS, -1}, FAM_SHA256},
+    {"hmac_md5_ksalt_batch",    {JOB_HMAC_MD5, -1}, FAM_MD5SALT},
+    {"hmac_md5_kpass_batch",    {JOB_HMAC_MD5_KPASS, -1}, FAM_MD5SALT},
+    {"hmac_sha1_ksalt_batch",   {JOB_HMAC_SHA1, -1}, FAM_SHA1},
+    {"hmac_sha1_kpass_batch",   {JOB_HMAC_SHA1_KPASS, -1}, FAM_SHA1},
+    {"sha512passsalt_batch",    {JOB_SHA512PASSSALT, -1}, FAM_HMAC_SHA512},
+    {"sha512saltpass_batch",   {JOB_SHA512SALTPASS, -1}, FAM_HMAC_SHA512},
+    {"hmac_sha512_ksalt_batch", {JOB_HMAC_SHA512, -1}, FAM_HMAC_SHA512},
+    {"hmac_sha512_kpass_batch", {JOB_HMAC_SHA512_KPASS, -1}, FAM_HMAC_SHA512},
+    {"hmac_sha384_ksalt_batch", {JOB_HMAC_SHA384, -1}, FAM_HMAC_SHA512},
+    {"hmac_sha384_kpass_batch", {JOB_HMAC_SHA384_KPASS, -1}, FAM_HMAC_SHA512},
+    {"sql5_unsalted_batch",    {JOB_SQL5, -1}, FAM_SHA1UNSALTED},
+    {"mysql3_unsalted_batch",  {JOB_MYSQL3, -1}, FAM_MYSQL3UNSALTED},
+    {"hmac_rmd160_ksalt_batch", {JOB_HMAC_RMD160, -1}, FAM_HMAC_RMD160},
+    {"hmac_rmd160_kpass_batch", {JOB_HMAC_RMD160_KPASS, -1}, FAM_HMAC_RMD160},
+    {"hmac_rmd320_ksalt_batch", {JOB_HMAC_RMD320, -1}, FAM_HMAC_RMD320},
+    {"hmac_rmd320_kpass_batch", {JOB_HMAC_RMD320_KPASS, -1}, FAM_HMAC_RMD320},
+    {"hmac_blake2s_kpass_batch", {JOB_HMAC_BLAKE2S, -1}, FAM_HMAC_BLAKE2S},
+    {"streebog256_unsalted_batch",     {JOB_STREEBOG_32, -1}, FAM_STREEBOG},
+    {"streebog512_unsalted_batch",     {JOB_STREEBOG_64, -1}, FAM_STREEBOG},
+    {"hmac_streebog256_kpass_batch",   {JOB_HMAC_STREEBOG256_KPASS, -1}, FAM_STREEBOG},
+    {"hmac_streebog256_ksalt_batch",   {JOB_HMAC_STREEBOG256_KSALT, -1}, FAM_STREEBOG},
+    {"hmac_streebog512_kpass_batch",   {JOB_HMAC_STREEBOG512_KPASS, -1}, FAM_STREEBOG},
+    {"hmac_streebog512_ksalt_batch",   {JOB_HMAC_STREEBOG512_KSALT, -1}, FAM_STREEBOG},
+    {"sha512crypt_batch",              {JOB_SHA512CRYPT, -1}, FAM_SHA512CRYPT},
+    {"sha256crypt_batch",              {JOB_SHA256CRYPT, -1}, FAM_SHA256CRYPT},
     {NULL, {-1}, 0}
 };
 #define KERN_ITER_IDX 2  /* index of md5salt_iter in kernel_map (for Maxiter override) */
@@ -851,33 +929,41 @@ void gpu_opencl_set_max_iter(int max_iter) { _max_iter = (max_iter < 1) ? 1 : ma
 void gpu_opencl_set_mask_resume(uint32_t start) { _mask_resume = start; }
 void gpu_opencl_set_op(int op) { _gpu_op = op; }
 
-/* Mask mode state — accessed by gpujob for hit reconstruction */
-uint8_t gpu_mask_desc[64];
+/* Mask mode state — accessed by gpujob for hit reconstruction.
+ * gpu_mask_desc layout: [sizes[n_total], tables[n_total][256]]
+ * sizes[i] = character count for position i
+ * tables[i] = 256-byte character table for position i
+ * Kernel indexes: ch = mask_desc[n_total + i*256 + (idx % mask_desc[i])] */
+#ifndef MAX_MASK_POS
+#define MAX_MASK_POS 16
+#endif
+uint8_t gpu_mask_desc[MAX_MASK_POS + MAX_MASK_POS * 256];
+uint8_t gpu_mask_sizes[MAX_MASK_POS];  /* for hit reconstruction */
 int gpu_mask_n_prepend = 0;
 int gpu_mask_n_append = 0;
 uint64_t gpu_mask_total = 0;
 
-static uint32_t mask_charset_size(uint8_t id) {
-    switch (id) { case 0: return 10; case 1: return 26; case 2: return 26;
-                  case 3: return 33; case 4: return 95; case 5: return 256; default: return 10; }
-}
-
-int gpu_opencl_set_mask(const uint8_t *prepend, int npre,
-                        const uint8_t *append, int napp) {
+int gpu_opencl_set_mask(const uint8_t *sizes, const uint8_t tables[][256],
+                        int npre, int napp) {
+    int ntotal = npre + napp;
     gpu_mask_n_prepend = npre;
     gpu_mask_n_append = napp;
-    if (npre) memcpy(gpu_mask_desc, prepend, npre);
-    if (napp) memcpy(gpu_mask_desc + npre, append, napp);
+    /* Pack: sizes first, then tables */
+    memcpy(gpu_mask_desc, sizes, ntotal);
+    memcpy(gpu_mask_sizes, sizes, ntotal);
+    for (int i = 0; i < ntotal; i++)
+        memcpy(gpu_mask_desc + ntotal + i * 256, tables[i], 256);
     gpu_mask_total = 1;
-    for (int i = 0; i < npre + napp; i++)
-        gpu_mask_total *= mask_charset_size(gpu_mask_desc[i]);
+    for (int i = 0; i < ntotal; i++)
+        gpu_mask_total *= sizes[i];
     /* Upload mask descriptor to all devices */
+    int bufsize = ntotal + ntotal * 256;
     for (int i = 0; i < num_gpu_devs; i++) {
         struct gpu_device *d = &gpu_devs[i];
         if (d->bgpu_mask_desc) clReleaseMemObject(d->bgpu_mask_desc);
         cl_int err;
         d->bgpu_mask_desc = clCreateBuffer(d->ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                                         npre + napp, gpu_mask_desc, &err);
+                                         bufsize, gpu_mask_desc, &err);
     }
     fprintf(stderr, "OpenCL GPU: mask mode: %d prepend + %d append = %llu combinations\n",
             npre, napp, (unsigned long long)gpu_mask_total);
@@ -906,7 +992,25 @@ uint32_t *gpu_opencl_dispatch_batch(int dev_idx,
     cl_int err;
 
     /* Upload words — unsalted pre-padded uses 64-byte stride, others 256 */
-    int word_stride = (cat == GPU_CAT_MASK && _gpu_op == JOB_MD5 && num_words > GPUBATCH_MAX) ? 64 : 256;
+    int word_stride;
+    if (cat == GPU_CAT_MASK && num_words > GPUBATCH_MAX) {
+        if (_gpu_op == JOB_SHA512 || _gpu_op == JOB_SHA384)
+            word_stride = 128;
+        else if (_gpu_op == JOB_MD6256)
+            word_stride = 712;
+        else if (_gpu_op == JOB_KECCAK224 || _gpu_op == JOB_SHA3_224)
+            word_stride = 152;
+        else if (_gpu_op == JOB_KECCAK256 || _gpu_op == JOB_SHA3_256)
+            word_stride = 144;
+        else if (_gpu_op == JOB_KECCAK384 || _gpu_op == JOB_SHA3_384)
+            word_stride = 112;
+        else if (_gpu_op == JOB_KECCAK512 || _gpu_op == JOB_SHA3_512)
+            word_stride = 80;
+        else
+            word_stride = 64;  /* MD5, MD4, SHA1, SHA224, SHA256, WRL */
+    } else {
+        word_stride = 256;
+    }
     size_t words_size = (size_t)num_words * word_stride;
     if (words_size > d->hexhash_cap) {
         if (d->b_hexhashes) clReleaseMemObject(d->b_hexhashes);

@@ -1121,12 +1121,36 @@ int gpu_op_category(int op) {
     case JOB_SHA256PASSSALT:
     case JOB_PHPBB3:
     case JOB_DESCRYPT:
+    case JOB_HMAC_MD5: case JOB_HMAC_MD5_KPASS:
+    case JOB_HMAC_SHA1: case JOB_HMAC_SHA1_KPASS:
+    case JOB_HMAC_SHA224: case JOB_HMAC_SHA224_KPASS:
+    case JOB_HMAC_SHA256: case JOB_HMAC_SHA256_KPASS:
+    case JOB_SHA512PASSSALT: case JOB_SHA512SALTPASS:
+    case JOB_HMAC_SHA384: case JOB_HMAC_SHA384_KPASS:
+    case JOB_HMAC_SHA512: case JOB_HMAC_SHA512_KPASS:
+    case JOB_HMAC_RMD160: case JOB_HMAC_RMD160_KPASS:
+    case JOB_HMAC_RMD320: case JOB_HMAC_RMD320_KPASS:
+    case JOB_HMAC_BLAKE2S:
         return GPU_CAT_SALTPASS;
-    /* Bare MD5 iterated -- disabled pending larger batch sizes
     case JOB_MD5:
-    case JOB_MD5UC:
-        return GPU_CAT_ITER;
-    */
+    case JOB_MD4:
+    case JOB_NTLMH:
+    case JOB_SHA1:
+    case JOB_SHA224:
+    case JOB_SHA256:
+    case JOB_SHA256RAW:
+    case JOB_SHA384:
+    case JOB_SHA512:
+    case JOB_WRL:
+    case JOB_MD6256:
+    case JOB_KECCAK224: case JOB_KECCAK256: case JOB_KECCAK384: case JOB_KECCAK512:
+    case JOB_SHA3_224: case JOB_SHA3_256: case JOB_SHA3_384: case JOB_SHA3_512:
+    case JOB_SQL5: case JOB_MYSQL3:
+    case JOB_STREEBOG_32: case JOB_STREEBOG_64:
+        return GPU_CAT_MASK;
+    case JOB_HMAC_STREEBOG256_KPASS: case JOB_HMAC_STREEBOG256_KSALT:
+    case JOB_HMAC_STREEBOG512_KPASS: case JOB_HMAC_STREEBOG512_KSALT:
+    case JOB_SHA512CRYPT: case JOB_SHA256CRYPT:
     default:
         return GPU_CAT_NONE;
     }

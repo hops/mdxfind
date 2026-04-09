@@ -180,9 +180,60 @@ int Neon;
 #define mysha1 SHA1
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.271 2026/04/08 03:54:18 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.288 2026/04/09 04:07:07 dlr Exp $";
 /*
  * $Log: mdxfind.c,v $
+ * Revision 1.288  2026/04/09 04:07:07  dlr
+ * GPU SHA256CRYPT (e512/7400) and SHA512CRYPT (e513/1800). Full crypt-sha256/crypt-sha512 with salt parsing, variable rounds, P/S-bytes setup, iterated main loop.
+ *
+ * Revision 1.287  2026/04/09 03:49:24  dlr
+ * GPU SHA512PASSSALT/SALTPASS (e386/e388), Streebog (e430/e431/e837-e840). Host-side mask table infrastructure (256-byte per-position tables, supports arbitrary charsets). SHA512CRYPT kernel written (e513/1800, not yet wired).
+ *
+ * Revision 1.286  2026/04/09 03:40:22  dlr
+ * GPU SHA512PASSSALT (e386/1710) and SHA512SALTPASS (e388/1720). Streebog unsalted+HMAC (e430/e431/e837-e840). 150/150 verified.
+ *
+ * Revision 1.285  2026/04/09 03:28:21  dlr
+ * GPU Streebog: e430/e431 unsalted + HMAC-STREEBOG256/512 ksalt/kpass (e837-e840, hashcat 11750/11760/11850/11860). 16KB S-box tables + 12-round LPS compress.
+ *
+ * Revision 1.284  2026/04/09 03:04:10  dlr
+ * GPU HMAC-BLAKE2S (e828/33300). BLAKE2s compress + full hash in OpenCL kernel.
+ *
+ * Revision 1.283  2026/04/09 02:56:22  dlr
+ * Fix -s salt loading for HMAC-KPASS types: init_default_salts skips types when SaltArray has pending salts. Default empty salt was blocking SaltArray copy in main().
+ *
+ * Revision 1.282  2026/04/09 02:28:23  dlr
+ * GPU HMAC-RMD320 (e213/33660, e799/33650). RMD320 compress from mhash source.
+ *
+ * Revision 1.281  2026/04/09 00:01:33  dlr
+ * GPU HMAC-RMD160 (e211/6060) and HMAC-RMD160-KPASS (e798/6050). RIPEMD-160 compress function.
+ *
+ * Revision 1.280  2026/04/08 23:44:54  dlr
+ * Fix -F loading with -h: fall back to Dohash when Doload is empty. HMAC-SHA224/SHA384 GPU.
+ *
+ * Revision 1.279  2026/04/08 23:39:49  dlr
+ * GPU HMAC-SHA224 (e216/e794) and HMAC-SHA384 (e543/e796) key=salt and key=pass.
+ *
+ * Revision 1.278  2026/04/08 23:22:15  dlr
+ * GPU SQL5 (sha1(sha1)) and MySQL3. Generalize pre-scan to all GPU_CAT_MASK types via gpu_try_pack_unsalted. Lazy word_stride init.
+ *
+ * Revision 1.277  2026/04/08 21:24:29  dlr
+ * GPU HMAC-MD5/SHA1/SHA256/SHA512 key=salt and key=pass (hashcat 50/60/150/160/1450/1460/1750/1760). Typeuser salt dispatch for key=salt types. Removed FAM_HMAC_SHA256, kernels in existing family files.
+ *
+ * Revision 1.276  2026/04/08 20:37:49  dlr
+ * GPU HMAC-SHA256: key=salt (e217/1460) and key=pass (e795/1450). Salted dispatch with Typeuser support for key=salt types.
+ *
+ * Revision 1.275  2026/04/08 19:55:41  dlr
+ * GPU Keccak-224/256/384/512 and SHA3-224/256/384/512 (e84-e91). Sponge packing with per-rate strides. Generalized SIMD zeroing loop. Removed redundant 55-byte length check from gpu_try_pack_unsalted caller.
+ *
+ * Revision 1.274  2026/04/08 18:32:33  dlr
+ * Fix SHA*RAW binary iteration (e35-e38): no longer falls through to hex loop. Add SHA256RAW GPU kernel. Map hashcat 1000 to e786 NTLMH.
+ *
+ * Revision 1.273  2026/04/08 18:04:53  dlr
+ * GPU MD6-256 (e29): pre-packed N[89] 712-byte blocks, 104-round compression loop, mask support. Also NTLMH UTF-16LE zero-extend packing.
+ *
+ * Revision 1.272  2026/04/08 17:31:19  dlr
+ * GPU unsalted kernels: MD4, SHA1, SHA224, SHA256, SHA384, SHA512, WRL, NTLMH. Pre-padded M[] framework with mask support. UTF-16LE zero-extend packing for NTLMH.
+ *
  * Revision 1.271  2026/04/08 03:54:18  dlr
  * *** empty log message ***
  *
@@ -3454,7 +3505,7 @@ struct MapHashcat {
     {610,  842},  /* BLAKE2b-512($pass.$salt) */
     {620,  843},  /* BLAKE2b-512($salt.$pass) */
     {900,  3},
-    {1000, 369},  /* NTLM */
+    {1000, 786},  /* NTLM — hashcat uses simple zero-extend UTF-16LE (NTLMH) */
     {1100, 439},  /* 1100 | Domain Cached Credentials (DCC), MS Cache */
     {1300, 9},
     {1310, 831},  /* 1310 | sha224($pass.$salt) */
@@ -7022,6 +7073,8 @@ static void init_default_salts(void) {
   for (i = 0; default_salts[i].salt; i++) {
     int j = default_salts[i].job;
     if (Typesalt[j]) continue;
+    /* Don't insert defaults if -s provided salts (SaltArray will copy later) */
+    if (SaltArray && (TypeOpts[j] & TYPEOPT_NEEDSALT)) continue;
     J1T(RC, Dohash, j);
     if (RC) {
       JSLI(PV, Typesalt[j], (unsigned char *)default_salts[i].salt);
@@ -8340,8 +8393,39 @@ static inline void lm_des_key(const unsigned char *raw7, DES_key_schedule *ks)
 int gpu_try_pack_unsalted(struct jobg **pjobg, struct job *job, int appendlen, int prependlen, char *pass, int len)
 {
     struct jobg *g = *pjobg;
-    if (job->op != JOB_MD5) {
+    int is_sha512 = (job->op == JOB_SHA512 || job->op == JOB_SHA384);
+    int is_utf16 = (job->op == JOB_NTLMH);
+    int is_md6 = (job->op == JOB_MD6256);
+    int keccak_rate = 0;  /* 0 = not keccak/sha3 */
+    int stride, maxcount, maxpasslen;
+
+    switch (job->op) {
+    case JOB_MD5: case JOB_MD4: case JOB_SHA1:
+    case JOB_SHA224: case JOB_SHA256: case JOB_SHA256RAW:
+    case JOB_WRL: case JOB_NTLMH:
+    case JOB_SQL5: case JOB_MYSQL3:
+    case JOB_STREEBOG_32: case JOB_STREEBOG_64:
+       stride = 64; maxcount = 4096; maxpasslen = 55; break;
+    case JOB_SHA384: case JOB_SHA512:
+       stride = 128; maxcount = 2048; maxpasslen = 111; break;
+    case JOB_MD6256:
+       stride = 712; maxcount = 359; maxpasslen = 511; break;
+    case JOB_KECCAK224: case JOB_SHA3_224:
+       keccak_rate = 144; stride = 152; maxcount = 1724; maxpasslen = 143; break;
+    case JOB_KECCAK256: case JOB_SHA3_256:
+       keccak_rate = 136; stride = 144; maxcount = 1820; maxpasslen = 135; break;
+    case JOB_KECCAK384: case JOB_SHA3_384:
+       keccak_rate = 104; stride = 112; maxcount = 2340; maxpasslen = 103; break;
+    case JOB_KECCAK512: case JOB_SHA3_512:
+       keccak_rate = 72; stride = 80; maxcount = 3276; maxpasslen = 71; break;
+    default:
        return(0);
+    }
+
+    if (is_utf16) {
+        if (2 * (prependlen + len + appendlen) > maxpasslen) return 0;
+    } else {
+        if ((prependlen + len + appendlen) > maxpasslen) return 0;
     }
 
     if (!g) {
@@ -8353,44 +8437,106 @@ int gpu_try_pack_unsalted(struct jobg **pjobg, struct job *job, int appendlen, i
         g->doneprint = job->doneprint;
         g->line_num = job->startline;
 	g->count = 0;
-	g->word_stride = 64;
-	g->max_count = 4096;
         *pjobg = g;
+    }
+    if (!g->word_stride) {
+	g->word_stride = stride;
+	g->max_count = maxcount;
     }
 
     int idx = g->count;
-    union HashU *h = (union HashU *)(g->raw + (idx * g->word_stride));
-    char *slot = (char *)h;
+    char *slot = g->raw + (idx * g->word_stride);
+    /* Zero the slot — SIMD for aligned 64-byte chunks, memset for remainder */
+    { int zlen = stride;
 #ifdef INTEL
-    h->x[0] = _mm_setzero_si128(); h->x[1] = _mm_setzero_si128();
-    h->x[2] = _mm_setzero_si128(); h->x[3] = _mm_setzero_si128();
+      union HashU *h = (union HashU *)slot;
+      while (zlen >= 64) {
+        h->x[0] = _mm_setzero_si128(); h->x[1] = _mm_setzero_si128();
+        h->x[2] = _mm_setzero_si128(); h->x[3] = _mm_setzero_si128();
+        h++; zlen -= 64;
+      }
+      if (zlen > 0) memset(h, 0, zlen);
 #elif ARM > 6
-    h->x[0] = vdupq_n_u32(0); h->x[1] = vdupq_n_u32(0);
-    h->x[2] = vdupq_n_u32(0); h->x[3] = vdupq_n_u32(0);
+      union HashU *h = (union HashU *)slot;
+      while (zlen >= 64) {
+        h->x[0] = vdupq_n_u32(0); h->x[1] = vdupq_n_u32(0);
+        h->x[2] = vdupq_n_u32(0); h->x[3] = vdupq_n_u32(0);
+        h++; zlen -= 64;
+      }
+      if (zlen > 0) memset(h, 0, zlen);
 #else
-    memset(slot, 0, 64);
+      memset(slot, 0, stride);
 #endif
+    }
 
-    /* Place password at prepend offset, leaving gaps for GPU mask fill */
-    memcpy(slot + prependlen, pass, len);
-    slot[prependlen + len + appendlen] = (char)0x80;
-    ((uint32_t *)slot)[14] = (prependlen + len + appendlen) * 8;
+    int total;
+    if (keccak_rate) {
+        /* Keccak/SHA-3: sponge padding into rate-sized block.
+         * Pad byte: 0x01 for Keccak, 0x06 for SHA-3. LE byte order (no swap). */
+        int pad_byte = (job->op >= JOB_SHA3_224 && job->op <= JOB_SHA3_512) ? 0x06 : 0x01;
+        memcpy(slot + prependlen, pass, len);
+        total = prependlen + len + appendlen;
+        slot[total] |= pad_byte;
+        slot[keccak_rate - 1] |= (char)0x80;
+        /* Store total_len as uint16 at byte offset rate for kernel mask append */
+        slot[keccak_rate] = total & 0xff;
+        slot[keccak_rate + 1] = (total >> 8) & 0xff;
+    } else if (is_md6) {
+        /* MD6-256: pack full N[89] array.
+         * Q[15] constants + K[8]=0 + U[1] + V[1] + B[64] with message as LE bytes.
+         * Kernel byte-swaps B portion before compression. */
+        static const uint64_t MD6_Q[15] = {
+            0x7311c2812425cfa0ULL, 0x6432286434aac8e7ULL, 0xb60450e9ef68b7c1ULL,
+            0xe8fb23908d9f06f1ULL, 0xdd2e76cba691e5bfULL, 0x0cd0d63b2c30bc41ULL,
+            0x1f8ccf6823058f8aULL, 0x54e5ed5b88e3775dULL, 0x4ad12aae0a6d6031ULL,
+            0x3e7f16bb88222e0dULL, 0x8af8671d3fb50c2cULL, 0x995ad1178bd25c31ULL,
+            0xc878c1dd04c4b633ULL, 0x3b72066c7a1552acULL, 0x0d6f3522631effcbULL
+        };
+        uint64_t *N = (uint64_t *)slot;
+        /* N[0..14] = Q */
+        memcpy(N, MD6_Q, 15 * sizeof(uint64_t));
+        /* N[15..22] = K = 0 (already zeroed) */
+        /* N[23] = U = nodeID(ell=1, i=0) */
+        N[23] = (uint64_t)1 << 56;
+        /* N[24] = V = control_word(r=104, L=64, z=1, p=pad_bits, keylen=0, d=256) */
+        total = prependlen + len + appendlen;
+        int p_bits = 64 * 64 - total * 8;
+        N[24] = ((uint64_t)104 << 48) | ((uint64_t)64 << 40) | ((uint64_t)1 << 36) |
+                ((uint64_t)p_bits << 20) | (uint64_t)256;
+        /* N[25..88] = B: place password at byte offset prependlen within B.
+         * B starts at slot byte offset 25*8 = 200. LE byte order — kernel bswaps. */
+        memcpy(slot + 200 + prependlen, pass, len);
+    } else if (is_utf16) {
+        int off = 2 * prependlen;
+        for (int i = 0; i < len; i++) {
+            slot[off + 2*i] = pass[i];
+        }
+        total = 2 * (prependlen + len + appendlen);
+        slot[total] = (char)0x80;
+        ((uint32_t *)slot)[14] = total * 8;
+    } else {
+        memcpy(slot + prependlen, pass, len);
+        total = prependlen + len + appendlen;
+        slot[total] = (char)0x80;
+        if (is_sha512) {
+            ((uint32_t *)slot)[30] = total * 8;
+        } else {
+            ((uint32_t *)slot)[14] = total * 8;
+        }
+    }
 
-    /* Password metadata: only pack if within array bounds (GPUBATCH_MAX).
-     * For unsalted batches with >512 words, hit handler reconstructs from M[] block. */
     if (idx < GPUBATCH_MAX) {
         g->passoff[idx] = idx * g->word_stride;
         g->passlen[idx] = len;
         g->clen[idx] = len;
         g->ruleindex[idx] = job->Ruleindex;
-        g->hexlen[idx] = prependlen + len + appendlen;
+        g->hexlen[idx] = total;
     }
 
 gpu_pack_done:
     g->count++;
 
-    /* Submit when batch limit reached */
-    if (g->count >= 4096) {
+    if (g->count >= maxcount) {
         gpujob_submit(g);
         *pjobg = NULL;
     }
@@ -8868,9 +9014,12 @@ while (1) {
 #ifdef GPU_ENABLED
   /* GPU pre-scan: for unsalted mask types, scan all words and pack GPU-eligible
    * ones into batches using blocking dispatch. A bitmap tracks which lines were
-   * GPU-handled so the main loop can skip them. */
+   * GPU-handled so the main loop can skip them.
+   * Uses gpu_try_pack_unsalted for per-algorithm packing; if it returns 0
+   * (GPU busy or word too long), skip to CPU. Use blocking gpujob_get_free
+   * to ensure GPU gets full batches. */
   unsigned char *gpu_done = NULL;
-  if (gpujob_available() && job->op == JOB_MD5 &&
+  if (gpujob_available() && gpu_op_category(job->op) == GPU_CAT_MASK &&
       (MaskAppendLen > 0 || MaskPrependLen > 0) && !Rules && !Email) {
     extern uint64_t gpu_mask_total;
     if (gpu_mask_total > 0) {
@@ -8889,54 +9038,24 @@ while (1) {
       for (unsigned int gl = 0; gl < job->numline; gl++) {
         char *s = &job->readbuf[job->readindex[job->startline + gl].offset];
         int slen = job->readindex[job->startline + gl].len;
-        if (slen + applen + prelen >= 55) continue;
 
-        /* Get or allocate GPU batch buffer (blocking) */
-        struct jobg *g = my_jobg;
-        if (!g) {
-          g = gpujob_get_free(job->filename, job->startline);
-          g->op = job->op;
-          g->filename = job->filename;
-          g->flags = job->flags;
-          g->doneprint = job->doneprint;
-          g->line_num = job->startline;
-          g->count = 0;
-          g->word_stride = 64;
-          g->max_count = 4096;
-          my_jobg = g;
+        /* Try non-blocking pack first; if GPU busy, block for a buffer */
+        if (!gpu_try_pack_unsalted(&my_jobg, job, applen, prelen, s, slen)) {
+          if (!my_jobg) {
+            /* GPU was busy — block for a free buffer and retry */
+            my_jobg = gpujob_get_free(job->filename, job->startline);
+            my_jobg->op = job->op;
+            my_jobg->filename = job->filename;
+            my_jobg->flags = job->flags;
+            my_jobg->doneprint = job->doneprint;
+            my_jobg->line_num = job->startline;
+            my_jobg->count = 0;
+            my_jobg->word_stride = 0; /* pack function will set on first use */
+          }
+          if (!gpu_try_pack_unsalted(&my_jobg, job, applen, prelen, s, slen))
+            continue;  /* word too long or unsupported — skip to CPU */
         }
-
-        int idx = g->count;
-        union HashU *h = (union HashU *)(g->raw + (idx * 64));
-        char *slot = (char *)h;
-#ifdef INTEL
-        h->x[0] = _mm_setzero_si128(); h->x[1] = _mm_setzero_si128();
-        h->x[2] = _mm_setzero_si128(); h->x[3] = _mm_setzero_si128();
-#elif ARM > 6
-        h->x[0] = vdupq_n_u32(0); h->x[1] = vdupq_n_u32(0);
-        h->x[2] = vdupq_n_u32(0); h->x[3] = vdupq_n_u32(0);
-#else
-        memset(slot, 0, 64);
-#endif
-        memcpy(slot + prelen, s, slen);
-        slot[prelen + slen + applen] = (char)0x80;
-        ((uint32_t *)slot)[14] = (prelen + slen + applen) * 8;
-
-        if (idx < GPUBATCH_MAX) {
-          g->passoff[idx] = idx * 64;
-          g->passlen[idx] = slen;
-          g->clen[idx] = slen;
-          g->ruleindex[idx] = 0;
-          g->hexlen[idx] = prelen + slen + applen;
-        }
-
-        g->count++;
         gpu_done[gl >> 3] |= (1 << (gl & 7));
-
-        if (g->count >= 4096) {
-          gpujob_submit(g);
-          my_jobg = NULL;
-        }
       }
       /* Flush partial batch */
       if (my_jobg && my_jobg->count > 0) {
@@ -9106,7 +9225,7 @@ if (job->flags & JOBFLAG_NUMBERS) {
      * GPU kernel expands all mask combinations from the pre-padded M[].
      * Suppress remaining mask iterations by advancing number_iter to the loop limit. */
     { extern uint64_t gpu_mask_total;
-    if (gpu_mask_total > 0 && job->MaskIndex == 0 && (len+MaskAppendLen+MaskPrependLen) < 55 &&
+    if (gpu_mask_total > 0 && job->MaskIndex == 0 &&
         gpu_try_pack_unsalted(&my_jobg,job,MaskAppendLen,MaskPrependLen,job->line,len)) {
       number_iter = (int)(job->MaskCount ? job->MaskCount : Iter_Count[job->digits]) - 1;
       Lfstate = 0;
@@ -25578,9 +25697,14 @@ sha1sha256:
                 goto SHA256_start;
 
               case JOB_SHA256RAW:
-                mysha256(cur, len, curin.h);
-                cur = (char *) curin.h;
-                len = 32;
+                hashcnt += Maxiter;
+                for (x = 1; x <= Maxiter; x++) {
+                  mysha256(cur, len, curin.h);
+                  cur = (char *) curin.h;
+                  len = 32;
+                  checkhash(&curin, 64, x, job);
+                }
+                break;
 
               case JOB_SHA256:
               SHA256_start:
@@ -25753,9 +25877,14 @@ sha1sha256:
                 goto SHA512_start;
 
               case JOB_SHA512RAW:
-                mysha512(cur, len, curin.h);
-                cur = (char *) curin.h;
-                len = 64;
+                hashcnt += Maxiter;
+                for (x = 1; x <= Maxiter; x++) {
+                  mysha512(cur, len, curin.h);
+                  cur = (char *) curin.h;
+                  len = 64;
+                  checkhash(&curin, 128, x, job);
+                }
+                break;
 
               case JOB_SHA512:
               SHA512_start:
@@ -25852,11 +25981,16 @@ sha1sha256:
                 goto SHA224_start;
 
               case JOB_SHA224RAW:
-                sph_sha224_init(&sha256ctx);
-                sph_sha224(&sha256ctx, cur, len);
-                sph_sha224_close(&sha256ctx, curin.h);
-                cur = (char *) curin.h;
-                len = 28;
+                hashcnt += Maxiter;
+                for (x = 1; x <= Maxiter; x++) {
+                  sph_sha224_init(&sha256ctx);
+                  sph_sha224(&sha256ctx, cur, len);
+                  sph_sha224_close(&sha256ctx, curin.h);
+                  cur = (char *) curin.h;
+                  len = 28;
+                  checkhash(&curin, 56, x, job);
+                }
+                break;
 
               case JOB_SHA224:
 SHA224_start:
@@ -25906,11 +26040,16 @@ SHA224_start:
                 goto SHA384_start;
 
               case JOB_SHA384RAW:
-                sph_sha384_init(&sha512ctx);
-                sph_sha384(&sha512ctx, cur, len);
-                sph_sha384_close(&sha512ctx, curin.h);
-                cur = (char *) curin.h;
-                len = 48;
+                hashcnt += Maxiter;
+                for (x = 1; x <= Maxiter; x++) {
+                  sph_sha384_init(&sha512ctx);
+                  sph_sha384(&sha512ctx, cur, len);
+                  sph_sha384_close(&sha512ctx, curin.h);
+                  cur = (char *) curin.h;
+                  len = 48;
+                  checkhash(&curin, 96, x, job);
+                }
+                break;
 
               case JOB_SHA384:
 SHA384_start:
@@ -34250,7 +34389,26 @@ void build_compact_table(void) {
                       JOB_SHA256PASSSALT, JOB_SHA256SALTPASS,
                       JOB_MD5CRYPT, JOB_MD5_MD5SALTMD5PASS,
                       JOB_SHA1SALTPASS, JOB_SHA1PASSSALT,
-                      JOB_SHA1DRU, JOB_PHPBB3, JOB_MD5, JOB_DESCRYPT, -1 };
+                      JOB_SHA1DRU, JOB_PHPBB3, JOB_MD5, JOB_MD4, JOB_SHA1,
+                      JOB_SHA224, JOB_SHA256, JOB_SHA384, JOB_SHA512,
+                      JOB_WRL, JOB_NTLMH, JOB_MD6256, JOB_SHA256RAW,
+                      JOB_KECCAK224, JOB_KECCAK256, JOB_KECCAK384, JOB_KECCAK512,
+                      JOB_SHA3_224, JOB_SHA3_256, JOB_SHA3_384, JOB_SHA3_512,
+                      JOB_HMAC_MD5, JOB_HMAC_MD5_KPASS,
+                      JOB_HMAC_SHA1, JOB_HMAC_SHA1_KPASS,
+                      JOB_HMAC_SHA224, JOB_HMAC_SHA224_KPASS,
+                      JOB_HMAC_SHA256, JOB_HMAC_SHA256_KPASS,
+                      JOB_HMAC_SHA384, JOB_HMAC_SHA384_KPASS,
+                      JOB_HMAC_SHA512, JOB_HMAC_SHA512_KPASS,
+                      JOB_HMAC_RMD160, JOB_HMAC_RMD160_KPASS,
+                      JOB_HMAC_RMD320, JOB_HMAC_RMD320_KPASS,
+                      JOB_HMAC_BLAKE2S,
+                      JOB_STREEBOG_32, JOB_STREEBOG_64,
+                      JOB_HMAC_STREEBOG256_KPASS, JOB_HMAC_STREEBOG256_KSALT,
+                      JOB_HMAC_STREEBOG512_KPASS, JOB_HMAC_STREEBOG512_KSALT,
+                      JOB_SHA512PASSSALT, JOB_SHA512SALTPASS,
+                      JOB_SHA512CRYPT, JOB_SHA256CRYPT,
+                      JOB_SQL5, JOB_MYSQL3, JOB_DESCRYPT, -1 };
     for (int gi = 0; gpu_ops[gi] >= 0; gi++) {
       Word_t grc;
       J1T(grc, Dohash, gpu_ops[gi]);
@@ -34655,7 +34813,10 @@ static void load_hash_file(gzFile gi, const char *filename, Pvoid_t *pDoload) {
   memset(Userloaded, 0, sizeof(Userloaded));
   any = 0;
 
-  /* Build lf[] (Load Format) array: which hash types are we looking for? */
+  /* Build lf[] (Load Format) array: which hash types are we looking for?
+   * If -F was used with -h (not -M), Doload is empty; fall back to Dohash. */
+  if (pDoload && *pDoload == NULL && Dohash != NULL)
+    pDoload = &Dohash;
   if (pDoload) {
     ti = 0;
     J1F(RC, *pDoload, ti);
@@ -39133,7 +39294,32 @@ int main(int argc, char **argv) {
                   x == JOB_MD5CRYPT || x == JOB_MD5_MD5SALTMD5PASS ||
                   x == JOB_SHA1SALTPASS || x == JOB_SHA1PASSSALT ||
                   x == JOB_SHA1DRU || x == JOB_PHPBB3 ||
-                  x == JOB_DESCRYPT || x == JOB_MD5)
+                  x == JOB_DESCRYPT || x == JOB_MD5 ||
+                  x == JOB_MD4 || x == JOB_NTLMH ||
+                  x == JOB_SHA1 ||
+                  x == JOB_SHA224 || x == JOB_SHA256 ||
+                  x == JOB_SHA384 || x == JOB_SHA512 ||
+                  x == JOB_WRL || x == JOB_MD6256 ||
+                  x == JOB_SHA256RAW ||
+                  x == JOB_KECCAK224 || x == JOB_KECCAK256 ||
+                  x == JOB_KECCAK384 || x == JOB_KECCAK512 ||
+                  x == JOB_SHA3_224 || x == JOB_SHA3_256 ||
+                  x == JOB_SHA3_384 || x == JOB_SHA3_512 ||
+                  x == JOB_HMAC_MD5 || x == JOB_HMAC_MD5_KPASS ||
+                  x == JOB_HMAC_SHA1 || x == JOB_HMAC_SHA1_KPASS ||
+                  x == JOB_HMAC_SHA224 || x == JOB_HMAC_SHA224_KPASS ||
+                  x == JOB_HMAC_SHA256 || x == JOB_HMAC_SHA256_KPASS ||
+                  x == JOB_HMAC_SHA384 || x == JOB_HMAC_SHA384_KPASS ||
+                  x == JOB_HMAC_SHA512 || x == JOB_HMAC_SHA512_KPASS ||
+                  x == JOB_HMAC_RMD160 || x == JOB_HMAC_RMD160_KPASS ||
+                  x == JOB_HMAC_RMD320 || x == JOB_HMAC_RMD320_KPASS ||
+                  x == JOB_HMAC_BLAKE2S ||
+                  x == JOB_STREEBOG_32 || x == JOB_STREEBOG_64 ||
+                  x == JOB_HMAC_STREEBOG256_KPASS || x == JOB_HMAC_STREEBOG256_KSALT ||
+                  x == JOB_HMAC_STREEBOG512_KPASS || x == JOB_HMAC_STREEBOG512_KSALT ||
+                  x == JOB_SHA512PASSSALT || x == JOB_SHA512SALTPASS ||
+                  x == JOB_SHA512CRYPT || x == JOB_SHA256CRYPT ||
+                  x == JOB_SQL5 || x == JOB_MYSQL3)
                 gpu = " [GPU]";
 #endif
               if (hci)
@@ -43324,9 +43510,44 @@ usage:
 	  case JOB_MD5sub8_24SALT: fam = 1u << FAM_MD5SALT; break;
 	  case JOB_MD5SALTPASS: case JOB_MD5PASSSALT: fam = 1u << FAM_MD5SALTPASS; break;
 	  case JOB_MD5: case JOB_MD5UC: fam = (1u << FAM_MD5SALT) | (1u << FAM_MD5UNSALTED); break;
+	  case JOB_MD4: case JOB_NTLMH: fam = 1u << FAM_MD4UNSALTED; break;
+	  case JOB_SHA1: fam = 1u << FAM_SHA1UNSALTED; break;
+	  case JOB_SHA256: case JOB_SHA256RAW: fam = 1u << FAM_SHA256UNSALTED; break;
+	  case JOB_SHA224: fam = 1u << FAM_SHA256UNSALTED; break;
+	  case JOB_SHA512: fam = 1u << FAM_SHA512UNSALTED; break;
+	  case JOB_SHA384: fam = 1u << FAM_SHA512UNSALTED; break;
+	  case JOB_WRL: fam = 1u << FAM_WRLUNSALTED; break;
+	  case JOB_MD6256: fam = 1u << FAM_MD6256UNSALTED; break;
+	  case JOB_KECCAK224: case JOB_KECCAK256: case JOB_KECCAK384: case JOB_KECCAK512:
+	  case JOB_SHA3_224: case JOB_SHA3_256: case JOB_SHA3_384: case JOB_SHA3_512:
+	    fam = 1u << FAM_KECCAKUNSALTED; break;
+	  case JOB_SQL5: fam = 1u << FAM_SHA1UNSALTED; break;
+	  case JOB_MYSQL3: fam = 1u << FAM_MYSQL3UNSALTED; break;
+	  case JOB_HMAC_MD5: case JOB_HMAC_MD5_KPASS:
+	    fam = 1u << FAM_MD5SALT; break;
+	  case JOB_HMAC_SHA1: case JOB_HMAC_SHA1_KPASS:
+	    fam = 1u << FAM_SHA1; break;
+	  case JOB_HMAC_SHA224: case JOB_HMAC_SHA224_KPASS:
+	  case JOB_HMAC_SHA256: case JOB_HMAC_SHA256_KPASS:
+	    fam = 1u << FAM_SHA256; break;
+	  case JOB_HMAC_SHA384: case JOB_HMAC_SHA384_KPASS:
+	  case JOB_HMAC_SHA512: case JOB_HMAC_SHA512_KPASS:
+	    fam = 1u << FAM_HMAC_SHA512; break;
+	  case JOB_HMAC_RMD160: case JOB_HMAC_RMD160_KPASS:
+	    fam = 1u << FAM_HMAC_RMD160; break;
+	  case JOB_HMAC_RMD320: case JOB_HMAC_RMD320_KPASS:
+	    fam = 1u << FAM_HMAC_RMD320; break;
+	  case JOB_HMAC_BLAKE2S: fam = 1u << FAM_HMAC_BLAKE2S; break;
+	  case JOB_STREEBOG_32: case JOB_STREEBOG_64:
+	  case JOB_HMAC_STREEBOG256_KPASS: case JOB_HMAC_STREEBOG256_KSALT:
+	  case JOB_HMAC_STREEBOG512_KPASS: case JOB_HMAC_STREEBOG512_KSALT:
+	    fam = 1u << FAM_STREEBOG; break;
 	  case JOB_PHPBB3: fam = 1u << FAM_PHPBB3; break;
 	  case JOB_MD5_MD5SALTMD5PASS: fam = 1u << FAM_MD5_MD5SALTMD5PASS; break;
 	  case JOB_SHA256PASSSALT: case JOB_SHA256SALTPASS: fam = 1u << FAM_SHA256; break;
+	  case JOB_SHA512PASSSALT: case JOB_SHA512SALTPASS: fam = 1u << FAM_HMAC_SHA512; break;
+	  case JOB_SHA512CRYPT: fam = 1u << FAM_SHA512CRYPT; break;
+	  case JOB_SHA256CRYPT: fam = 1u << FAM_SHA256CRYPT; break;
 	  case JOB_DESCRYPT: fam = 1u << FAM_DESCRYPT; break;
 	}
 	if (fam & FAM_MD5SALT) {
@@ -43359,11 +43580,47 @@ usage:
             case JOB_MD5sub8_24SALT: fam |= 1u << FAM_MD5SALT; break;
             case JOB_MD5SALTPASS: case JOB_MD5PASSSALT: fam |= 1u << FAM_MD5SALTPASS; break;
             case JOB_MD5: case JOB_MD5UC: fam |= (1u << FAM_MD5ITER) | (1u << FAM_MD5MASK) | (1u << FAM_MD5UNSALTED); break;
+            case JOB_MD4: case JOB_NTLMH: fam |= 1u << FAM_MD4UNSALTED; break;
+            case JOB_SHA1: fam |= 1u << FAM_SHA1UNSALTED; break;
+            case JOB_SHA256: case JOB_SHA256RAW: fam |= 1u << FAM_SHA256UNSALTED; break;
+            case JOB_SHA224: fam |= 1u << FAM_SHA256UNSALTED; break;
+            case JOB_SHA512: fam |= 1u << FAM_SHA512UNSALTED; break;
+            case JOB_SHA384: fam |= 1u << FAM_SHA512UNSALTED; break;
+            case JOB_WRL: fam |= 1u << FAM_WRLUNSALTED; break;
+            case JOB_MD6256: fam |= 1u << FAM_MD6256UNSALTED; break;
+            case JOB_KECCAK224: case JOB_KECCAK256: case JOB_KECCAK384: case JOB_KECCAK512:
+            case JOB_SHA3_224: case JOB_SHA3_256: case JOB_SHA3_384: case JOB_SHA3_512:
+              fam |= 1u << FAM_KECCAKUNSALTED; break;
+            case JOB_SQL5: fam |= 1u << FAM_SHA1UNSALTED; break;
+            case JOB_MYSQL3: fam |= 1u << FAM_MYSQL3UNSALTED; break;
+            case JOB_HMAC_MD5: case JOB_HMAC_MD5_KPASS:
+              fam |= 1u << FAM_MD5SALT; break;
+            case JOB_HMAC_SHA1: case JOB_HMAC_SHA1_KPASS:
+              fam |= 1u << FAM_SHA1; break;
+            case JOB_HMAC_SHA224: case JOB_HMAC_SHA224_KPASS:
+            case JOB_HMAC_SHA256: case JOB_HMAC_SHA256_KPASS:
+              fam |= 1u << FAM_SHA256; break;
+            case JOB_HMAC_SHA384: case JOB_HMAC_SHA384_KPASS:
+            case JOB_HMAC_SHA512: case JOB_HMAC_SHA512_KPASS:
+              fam |= 1u << FAM_HMAC_SHA512; break;
+            case JOB_HMAC_RMD160: case JOB_HMAC_RMD160_KPASS:
+              fam |= 1u << FAM_HMAC_RMD160; break;
+            case JOB_HMAC_RMD320: case JOB_HMAC_RMD320_KPASS:
+              fam |= 1u << FAM_HMAC_RMD320; break;
+            case JOB_HMAC_BLAKE2S:
+              fam |= 1u << FAM_HMAC_BLAKE2S; break;
+            case JOB_STREEBOG_32: case JOB_STREEBOG_64:
+            case JOB_HMAC_STREEBOG256_KPASS: case JOB_HMAC_STREEBOG256_KSALT:
+            case JOB_HMAC_STREEBOG512_KPASS: case JOB_HMAC_STREEBOG512_KSALT:
+              fam |= 1u << FAM_STREEBOG; break;
             case JOB_PHPBB3: fam |= 1u << FAM_PHPBB3; break;
             case JOB_MD5CRYPT: fam |= 1u << FAM_MD5CRYPT; break;
             case JOB_MD5_MD5SALTMD5PASS: fam |= 1u << FAM_MD5_MD5SALTMD5PASS; break;
             case JOB_SHA1PASSSALT: case JOB_SHA1SALTPASS: case JOB_SHA1DRU: fam |= 1u << FAM_SHA1; break;
             case JOB_SHA256PASSSALT: case JOB_SHA256SALTPASS: fam |= 1u << FAM_SHA256; break;
+            case JOB_SHA512PASSSALT: case JOB_SHA512SALTPASS: fam |= 1u << FAM_HMAC_SHA512; break;
+            case JOB_SHA512CRYPT: fam |= 1u << FAM_SHA512CRYPT; break;
+            case JOB_SHA256CRYPT: fam |= 1u << FAM_SHA256CRYPT; break;
             case JOB_DESCRYPT: fam |= 1u << FAM_DESCRYPT; break;
           }
 	  if (fam & FAM_MD5SALT) {
@@ -43378,47 +43635,69 @@ usage:
       /* Upload mask descriptor to GPU if mask mode is active */
       if ((MaskPrependLen > 0 || MaskAppendLen > 0 || MaskLen > 0) && gpu_opencl_available()) {
         int gpu_mask_ok = 1;
-        uint8_t pre_desc[MAX_MASK_POS], app_desc[MAX_MASK_POS];
+        static uint8_t mask_sizes[MAX_MASK_POS * 2];
+        static uint8_t mask_tables[MAX_MASK_POS * 2][256];
         int npre = 0, napp = 0;
 
-        /* Build prepend descriptor */
+        /* Build prepend tables from MaskClasses */
         for (int mi = 0; mi < MaskPrependLen; mi++) {
           int cid = MaskPrependPattern[mi].classid;
           if (cid == MASK_LITERAL) {
-            /* TODO: GPU literal support (Phase 1 of plan) */
-            gpu_mask_ok = 0; break;
-          } else if (cid >= 0 && cid <= 5) {
-            pre_desc[npre++] = (uint8_t)cid;
+            /* Literal: 1-character table */
+            mask_sizes[npre] = 1;
+            memset(mask_tables[npre], 0, 256);
+            mask_tables[npre][0] = MaskPrependPattern[mi].literal;
+            npre++;
+          } else if (cid >= 0 && cid < MASK_MAX_CLASSES && MaskClasses[cid].count > 0) {
+            mask_sizes[npre] = (uint8_t)MaskClasses[cid].count;
+            memcpy(mask_tables[npre], MaskClasses[cid].chars, 256);
+            npre++;
           } else {
             gpu_mask_ok = 0; break;
           }
         }
-        /* Build append descriptor */
+        /* Build append tables */
         if (gpu_mask_ok) {
           for (int mi = 0; mi < MaskAppendLen; mi++) {
             int cid = MaskAppendPattern[mi].classid;
+            int ti = npre + napp;
             if (cid == MASK_LITERAL) {
-              gpu_mask_ok = 0; break;
-            } else if (cid >= 0 && cid <= 5) {
-              app_desc[napp++] = (uint8_t)cid;
+              mask_sizes[ti] = 1;
+              memset(mask_tables[ti], 0, 256);
+              mask_tables[ti][0] = MaskAppendPattern[mi].literal;
+              napp++;
+            } else if (cid >= 0 && cid < MASK_MAX_CLASSES && MaskClasses[cid].count > 0) {
+              mask_sizes[ti] = (uint8_t)MaskClasses[cid].count;
+              memcpy(mask_tables[ti], MaskClasses[cid].chars, 256);
+              napp++;
             } else {
               gpu_mask_ok = 0; break;
             }
           }
         }
-        /* Legacy single-mask fallback (neither prepend nor append pattern set) */
+        /* Legacy single-mask fallback */
         if (gpu_mask_ok && npre == 0 && napp == 0 && MaskLen > 0) {
           for (int mi = 0; mi < MaskLen; mi++) {
             int cid = MaskPattern[mi].classid;
-            if (cid < 0 || cid > 5) { gpu_mask_ok = 0; break; }
-            if (MaskPrepend)
-              pre_desc[npre++] = (uint8_t)cid;
-            else
-              app_desc[napp++] = (uint8_t)cid;
+            int ti;
+            if (cid == MASK_LITERAL) {
+              ti = MaskPrepend ? npre : (npre + napp);
+              mask_sizes[ti] = 1;
+              memset(mask_tables[ti], 0, 256);
+              mask_tables[ti][0] = MaskPattern[mi].literal;
+              if (MaskPrepend) npre++; else napp++;
+            } else if (cid >= 0 && cid < MASK_MAX_CLASSES && MaskClasses[cid].count > 0) {
+              ti = MaskPrepend ? npre : (npre + napp);
+              mask_sizes[ti] = (uint8_t)MaskClasses[cid].count;
+              memcpy(mask_tables[ti], MaskClasses[cid].chars, 256);
+              if (MaskPrepend) npre++; else napp++;
+            } else {
+              gpu_mask_ok = 0; break;
+            }
           }
         }
         if (gpu_mask_ok && (npre > 0 || napp > 0))
-          gpu_opencl_set_mask(pre_desc, npre, app_desc, napp);
+          gpu_opencl_set_mask(mask_sizes, mask_tables, npre, napp);
       }
 #endif
     }

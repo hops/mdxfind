@@ -155,10 +155,15 @@ sha1_shani.o: sha1_shani.c
 
 # Metal GPU source files (Objective-C++)
 ifdef METAL_GPU
-gpu_metal.o: gpu_metal.m gpu_metal.h gpujob.h \
+gpu_metal.o: gpu_metal.m gpu_metal.h gpujob.h job_types.h \
              gpu/metal_common_str.h gpu/metal_md5salt_str.h gpu/metal_md5saltpass_str.h \
              gpu/metal_md5_md5saltmd5pass_str.h gpu/metal_sha256_str.h gpu/metal_phpbb3_str.h \
-             gpu/metal_descrypt_str.h gpu/metal_md5unsalted_str.h
+             gpu/metal_descrypt_str.h gpu/metal_md5unsalted_str.h gpu/metal_md4unsalted_str.h \
+             gpu/metal_sha1unsalted_str.h gpu/metal_sha256unsalted_str.h gpu/metal_sha512unsalted_str.h \
+             gpu/metal_md6256unsalted_str.h gpu/metal_wrlunsalted_str.h gpu/metal_keccakunsalted_str.h \
+             gpu/metal_mysql3unsalted_str.h gpu/metal_hmac_sha256_str.h gpu/metal_hmac_sha512_str.h \
+             gpu/metal_hmac_rmd160_str.h gpu/metal_hmac_rmd320_str.h gpu/metal_hmac_blake2s_str.h \
+             gpu/metal_streebog_str.h gpu/metal_sha256crypt_str.h gpu/metal_sha512crypt_str.h
 	$(CC) -x objective-c++ $(CFLAGS) -std=c++11 -c gpu_metal.m
 
 gpujob_metal.o: gpujob_metal.m gpujob.h job_types.h gpu_metal.h mdxfind.h
@@ -178,12 +183,19 @@ gpu/gpu_kernels_str.h: gpu/gpu_kernels.cl
 	python3 -c 'import sys; s=open("gpu/gpu_kernels.cl").read(); f=open("gpu/gpu_kernels_str.h","w"); f.write("/* Auto-generated from gpu_kernels.cl -- do not edit */\n"); f.write("static const char gpu_kernels_str[] =\n"); [f.write("    \""+l.replace(chr(92),chr(92)+chr(92)).replace(chr(34),chr(92)+chr(34))+"\\n\"\n") for l in s.split(chr(10))]; f.write(";\n")'
 
 ifdef OPENCL_GPU
-gpu/gpu_opencl.o: gpu/gpu_opencl.c gpu/gpu_opencl.h gpu/gpu_kernels_str.h gpujob.h \
-                  gpu/gpu_md5unsalted_str.h gpu/gpu_descrypt_str.h \
+gpu/gpu_opencl.o: gpu/gpu_opencl.c gpu/gpu_opencl.h gpu/gpu_kernels_str.h gpujob.h job_types.h \
                   gpu/gpu_common_str.h gpu/gpu_md5salt_str.h gpu/gpu_md5saltpass_str.h \
                   gpu/gpu_md5iter_str.h gpu/gpu_phpbb3_str.h gpu/gpu_md5crypt_str.h \
                   gpu/gpu_md5_md5saltmd5pass_str.h gpu/gpu_sha1_str.h gpu/gpu_sha256_str.h \
-                  gpu/gpu_md5mask_str.h
+                  gpu/gpu_md5mask_str.h gpu/gpu_descrypt_str.h gpu/gpu_md5unsalted_str.h \
+                  gpu/gpu_md4unsalted_str.h gpu/gpu_sha1unsalted_str.h \
+                  gpu/gpu_sha256unsalted_str.h gpu/gpu_sha512unsalted_str.h \
+                  gpu/gpu_md6256unsalted_str.h gpu/gpu_wrlunsalted_str.h \
+                  gpu/gpu_keccakunsalted_str.h gpu/gpu_mysql3unsalted_str.h \
+                  gpu/gpu_hmac_sha256_str.h gpu/gpu_hmac_sha512_str.h \
+                  gpu/gpu_hmac_rmd160_str.h gpu/gpu_hmac_rmd320_str.h \
+                  gpu/gpu_hmac_blake2s_str.h gpu/gpu_streebog_str.h \
+                  gpu/gpu_sha256crypt_str.h gpu/gpu_sha512crypt_str.h
 	$(CC) -DOPENCL_GPU=1 -DCL_TARGET_OPENCL_VERSION=120 -I. -Igpu $(INCEXTRA) -O3 -pthread -c gpu/gpu_opencl.c -o gpu/gpu_opencl.o
 
 gpu/gpujob_opencl.o: gpu/gpujob_opencl.c gpu/gpu_opencl.h gpujob.h job_types.h mdxfind.h

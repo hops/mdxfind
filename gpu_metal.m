@@ -25,6 +25,22 @@
 #include "gpu/metal_phpbb3_str.h"
 #include "gpu/metal_descrypt_str.h"
 #include "gpu/metal_md5unsalted_str.h"
+#include "gpu/metal_md4unsalted_str.h"
+#include "gpu/metal_sha1unsalted_str.h"
+#include "gpu/metal_sha256unsalted_str.h"
+#include "gpu/metal_sha512unsalted_str.h"
+#include "gpu/metal_wrlunsalted_str.h"
+#include "gpu/metal_md6256unsalted_str.h"
+#include "gpu/metal_keccakunsalted_str.h"
+/* HMAC-SHA256 kernels are in metal_sha256.metal (FAM_SHA256) */
+#include "gpu/metal_hmac_sha512_str.h"
+#include "gpu/metal_mysql3unsalted_str.h"
+#include "gpu/metal_hmac_rmd160_str.h"
+#include "gpu/metal_hmac_rmd320_str.h"
+#include "gpu/metal_hmac_blake2s_str.h"
+#include "gpu/metal_streebog_str.h"
+#include "gpu/metal_sha512crypt_str.h"
+#include "gpu/metal_sha256crypt_str.h"
 
 /* Family IDs from gpujob.h FAM_* enum — Metal uses a subset */
 static const char *mtl_family_source[FAM_COUNT] = {
@@ -35,6 +51,21 @@ static const char *mtl_family_source[FAM_COUNT] = {
     [FAM_PHPBB3]             = metal_phpbb3_str,
     [FAM_DESCRYPT]           = metal_descrypt_str,
     [FAM_MD5UNSALTED]        = metal_md5unsalted_str,
+    [FAM_MD4UNSALTED]        = metal_md4unsalted_str,
+    [FAM_SHA1UNSALTED]       = metal_sha1unsalted_str,
+    [FAM_SHA256UNSALTED]     = metal_sha256unsalted_str,
+    [FAM_SHA512UNSALTED]     = metal_sha512unsalted_str,
+    [FAM_WRLUNSALTED]        = metal_wrlunsalted_str,
+    [FAM_MD6256UNSALTED]     = metal_md6256unsalted_str,
+    [FAM_KECCAKUNSALTED]     = metal_keccakunsalted_str,
+    [FAM_HMAC_SHA512]        = metal_hmac_sha512_str,
+    [FAM_MYSQL3UNSALTED]     = metal_mysql3unsalted_str,
+    [FAM_HMAC_RMD160]       = metal_hmac_rmd160_str,
+    [FAM_HMAC_RMD320]       = metal_hmac_rmd320_str,
+    [FAM_HMAC_BLAKE2S]      = metal_hmac_blake2s_str,
+    [FAM_STREEBOG]          = metal_streebog_str,
+    [FAM_SHA512CRYPT]       = metal_sha512crypt_str,
+    [FAM_SHA256CRYPT]       = metal_sha256crypt_str,
 };
 
 /* ---- Metal state ---- */
@@ -63,6 +94,52 @@ static const struct {
     {"phpbb3_batch",             {JOB_PHPBB3, -1}, FAM_PHPBB3},
     {"descrypt_batch",           {JOB_DESCRYPT, -1}, FAM_DESCRYPT},
     {"md5_unsalted_batch",       {JOB_MD5, -1}, FAM_MD5UNSALTED},
+    {"md4_unsalted_batch",       {JOB_MD4, -1}, FAM_MD4UNSALTED},
+    {"md4utf16_unsalted_batch",  {JOB_NTLMH, -1}, FAM_MD4UNSALTED},
+    {"sha1_unsalted_batch",      {JOB_SHA1, -1}, FAM_SHA1UNSALTED},
+    {"sha256_unsalted_batch",    {JOB_SHA256, -1}, FAM_SHA256UNSALTED},
+    {"sha224_unsalted_batch",    {JOB_SHA224, -1}, FAM_SHA256UNSALTED},
+    {"sha512_unsalted_batch",    {JOB_SHA512, -1}, FAM_SHA512UNSALTED},
+    {"sha384_unsalted_batch",    {JOB_SHA384, -1}, FAM_SHA512UNSALTED},
+    {"wrl_unsalted_batch",       {JOB_WRL, -1}, FAM_WRLUNSALTED},
+    {"md6_256_unsalted_batch",   {JOB_MD6256, -1}, FAM_MD6256UNSALTED},
+    {"keccak224_unsalted_batch", {JOB_KECCAK224, -1}, FAM_KECCAKUNSALTED},
+    {"keccak256_unsalted_batch", {JOB_KECCAK256, -1}, FAM_KECCAKUNSALTED},
+    {"keccak384_unsalted_batch", {JOB_KECCAK384, -1}, FAM_KECCAKUNSALTED},
+    {"keccak512_unsalted_batch", {JOB_KECCAK512, -1}, FAM_KECCAKUNSALTED},
+    {"sha3_224_unsalted_batch",  {JOB_SHA3_224, -1}, FAM_KECCAKUNSALTED},
+    {"sha3_256_unsalted_batch",  {JOB_SHA3_256, -1}, FAM_KECCAKUNSALTED},
+    {"sha3_384_unsalted_batch",  {JOB_SHA3_384, -1}, FAM_KECCAKUNSALTED},
+    {"sha3_512_unsalted_batch",  {JOB_SHA3_512, -1}, FAM_KECCAKUNSALTED},
+    {"hmac_sha256_ksalt_batch",  {JOB_HMAC_SHA256, -1}, FAM_SHA256},
+    {"hmac_sha256_kpass_batch",  {JOB_HMAC_SHA256_KPASS, -1}, FAM_SHA256},
+    {"hmac_sha224_ksalt_batch",  {JOB_HMAC_SHA224, -1}, FAM_SHA256},
+    {"hmac_sha224_kpass_batch",  {JOB_HMAC_SHA224_KPASS, -1}, FAM_SHA256},
+    {"hmac_md5_ksalt_batch",    {JOB_HMAC_MD5, -1}, FAM_MD5SALT},
+    {"hmac_md5_kpass_batch",    {JOB_HMAC_MD5_KPASS, -1}, FAM_MD5SALT},
+    {"hmac_sha1_ksalt_batch",   {JOB_HMAC_SHA1, -1}, FAM_SHA1},
+    {"hmac_sha1_kpass_batch",   {JOB_HMAC_SHA1_KPASS, -1}, FAM_SHA1},
+    {"sha512passsalt_batch",    {JOB_SHA512PASSSALT, -1}, FAM_HMAC_SHA512},
+    {"sha512saltpass_batch",   {JOB_SHA512SALTPASS, -1}, FAM_HMAC_SHA512},
+    {"hmac_sha512_ksalt_batch", {JOB_HMAC_SHA512, -1}, FAM_HMAC_SHA512},
+    {"hmac_sha512_kpass_batch", {JOB_HMAC_SHA512_KPASS, -1}, FAM_HMAC_SHA512},
+    {"hmac_sha384_ksalt_batch", {JOB_HMAC_SHA384, -1}, FAM_HMAC_SHA512},
+    {"hmac_sha384_kpass_batch", {JOB_HMAC_SHA384_KPASS, -1}, FAM_HMAC_SHA512},
+    {"sql5_unsalted_batch",    {JOB_SQL5, -1}, FAM_SHA1UNSALTED},
+    {"mysql3_unsalted_batch",  {JOB_MYSQL3, -1}, FAM_MYSQL3UNSALTED},
+    {"hmac_rmd160_ksalt_batch", {JOB_HMAC_RMD160, -1}, FAM_HMAC_RMD160},
+    {"hmac_rmd160_kpass_batch", {JOB_HMAC_RMD160_KPASS, -1}, FAM_HMAC_RMD160},
+    {"hmac_rmd320_ksalt_batch", {JOB_HMAC_RMD320, -1}, FAM_HMAC_RMD320},
+    {"hmac_rmd320_kpass_batch", {JOB_HMAC_RMD320_KPASS, -1}, FAM_HMAC_RMD320},
+    {"hmac_blake2s_kpass_batch", {JOB_HMAC_BLAKE2S, -1}, FAM_HMAC_BLAKE2S},
+    {"streebog256_unsalted_batch",     {JOB_STREEBOG_32, -1}, FAM_STREEBOG},
+    {"streebog512_unsalted_batch",     {JOB_STREEBOG_64, -1}, FAM_STREEBOG},
+    {"hmac_streebog256_kpass_batch",   {JOB_HMAC_STREEBOG256_KPASS, -1}, FAM_STREEBOG},
+    {"hmac_streebog256_ksalt_batch",   {JOB_HMAC_STREEBOG256_KSALT, -1}, FAM_STREEBOG},
+    {"hmac_streebog512_kpass_batch",   {JOB_HMAC_STREEBOG512_KPASS, -1}, FAM_STREEBOG},
+    {"hmac_streebog512_ksalt_batch",   {JOB_HMAC_STREEBOG512_KSALT, -1}, FAM_STREEBOG},
+    {"sha512crypt_batch",              {JOB_SHA512CRYPT, -1}, FAM_SHA512CRYPT},
+    {"sha256crypt_batch",              {JOB_SHA256CRYPT, -1}, FAM_SHA256CRYPT},
     {NULL, {-1}, 0}
 };
 #define MTL_KERN_ITER_IDX 2

@@ -28,6 +28,10 @@ void gpu_metal_shutdown(void);
 /* Returns 1 if Metal GPU is initialized and ready for dispatch. */
 int gpu_metal_available(void);
 
+/* Compile additional kernel families on demand.
+ * fam_mask is a bitmask of MTL_FAM_* values (from gpujob.h). */
+void gpu_metal_compile_families(unsigned int fam_mask);
+
 /* Register the compact hash table for zero-copy GPU access.
  * Must be called once after the compact table is built (after hash loading).
  * Returns 0 on success, -1 on failure. */
@@ -144,6 +148,10 @@ void gpu_metal_set_max_iter(int max_iter);
 /* Set the current op type for GPU kernel selection.
  * Used to select specialized kernels (e.g., sub8-24 = op 542). */
 void gpu_metal_set_op(int op);
+
+/* Set uniform iteration count for PHPBB3 grouped dispatch.
+ * 0 = use per-salt decode (default). Non-zero = all threads use this count. */
+void gpu_metal_set_iter_count(int count);
 
 /* ---- Double-buffer slot API ---- */
 

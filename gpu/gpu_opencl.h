@@ -45,8 +45,8 @@ void gpu_opencl_set_max_iter(int max_iter);
 void gpu_opencl_set_mask_resume(uint32_t start);
 void gpu_opencl_set_op(int op);
 int gpu_opencl_max_batch(int dev_idx);
-int gpu_opencl_set_mask(const uint8_t *prepend, int npre,
-                        const uint8_t *append, int napp);
+int gpu_opencl_set_mask(const uint8_t *sizes, const uint8_t tables[][256],
+                        int npre, int napp);
 
 uint32_t *gpu_opencl_dispatch_batch(int dev_idx,
     const char *hexhashes, const uint16_t *hexlens,
