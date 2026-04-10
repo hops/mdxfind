@@ -178,9 +178,7 @@ endif
 job_types.h: mdxfind.c
 	(echo '/* Auto-generated from mdxfind.c -- do not edit */'; echo '#ifndef NO_JOB_TYPES'; grep '^#define JOB_' mdxfind.c; echo '#endif') > job_types.h
 
-# OpenCL GPU source files
-gpu/gpu_kernels_str.h: gpu/gpu_kernels.cl
-	python3 -c 'import sys; s=open("gpu/gpu_kernels.cl").read(); f=open("gpu/gpu_kernels_str.h","w"); f.write("/* Auto-generated from gpu_kernels.cl -- do not edit */\n"); f.write("static const char gpu_kernels_str[] =\n"); [f.write("    \""+l.replace(chr(92),chr(92)+chr(92)).replace(chr(34),chr(92)+chr(34))+"\\n\"\n") for l in s.split(chr(10))]; f.write(";\n")'
+
 
 ifdef OPENCL_GPU
 gpu/gpu_opencl.o: gpu/gpu_opencl.c gpu/gpu_opencl.h gpu/gpu_kernels_str.h gpujob.h job_types.h \
