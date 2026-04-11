@@ -66,6 +66,7 @@ static int _overflow_count = 0;
 static int _max_iter = 1;
 static int _gpu_op = 0;
 static uint32_t _mask_resume = 0;  /* mask_start override for overflow retry */
+static uint32_t _salt_resume = 0;  /* salt_start override for overflow retry */
 
 /* ---- Per-kernel autotune state ---- */
 #define TUNE_CANDIDATES 4
@@ -100,6 +101,10 @@ static void kern_register(int di, int op, cl_kernel kernel) {
     struct gpu_kern *k = &dev_kerns[di].kerns[op];
     size_t max_wg = 0;
     clGetKernelWorkGroupInfo(kernel, gpu_devs[di].dev, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_wg), &max_wg, NULL);
+    /* Check for reqd_work_group_size — if set, the required size overrides max_wg */
+    size_t req_wg[3] = {0, 0, 0};
+    clGetKernelWorkGroupInfo(kernel, gpu_devs[di].dev, CL_KERNEL_COMPILE_WORK_GROUP_SIZE, sizeof(req_wg), req_wg, NULL);
+    if (req_wg[0] > 0) max_wg = req_wg[0];
     k->kernel = kernel;
     k->max_local = max_wg;
     k->dev_idx = di;
@@ -107,7 +112,7 @@ static void kern_register(int di, int op, cl_kernel kernel) {
     k->tune_candidate = 0;
     k->tune_samples = 0;
     k->tune_best_time = 1e30;
-    k->tune_best_size = 64;
+    k->tune_best_size = max_wg ? max_wg : 64;
     k->tune_cur_total = 0;
     int c = 0;
     while (c < TUNE_CANDIDATES && tune_sizes[c] > max_wg) c++;
@@ -219,6 +224,9 @@ static char *load_kernel_file(const char *path) {
 #include "gpu_streebog_str.h"
 #include "gpu_sha512crypt_str.h"
 #include "gpu_sha256crypt_str.h"
+#include "gpu_rmd160unsalted_str.h"
+#include "gpu_blake2s256unsalted_str.h"
+#include "gpu_bcrypt_str.h"
 /* Old monolithic kernel source removed — per-family compilation now.
  * See gpu_common_str.h + gpu_*_str.h
  *
@@ -306,6 +314,9 @@ static const char *family_source[FAM_COUNT] = {
     [FAM_STREEBOG]          = gpu_streebog_str,
     [FAM_SHA512CRYPT]       = gpu_sha512crypt_str,
     [FAM_SHA256CRYPT]       = gpu_sha256crypt_str,
+    [FAM_RMD160UNSALTED]    = gpu_rmd160unsalted_str,
+    [FAM_BLAKE2S256UNSALTED] = gpu_blake2s256unsalted_str,
+    [FAM_BCRYPT]            = gpu_bcrypt_str,
 };
 
 /* Kernel-to-op mapping table. Each entry: kernel function name, ops it serves, family.
@@ -366,6 +377,10 @@ static const struct {
     {"hmac_sha384_ksalt_batch", {JOB_HMAC_SHA384, -1}, FAM_HMAC_SHA512},
     {"hmac_sha384_kpass_batch", {JOB_HMAC_SHA384_KPASS, -1}, FAM_HMAC_SHA512},
     {"sql5_unsalted_batch",    {JOB_SQL5, -1}, FAM_SHA1UNSALTED},
+    {"sql5_unsalted_batch",    {JOB_SHA1RAW, -1}, FAM_SHA1UNSALTED},
+    {"md5raw_unsalted_batch",  {JOB_MD5RAW, -1}, FAM_MD5UNSALTED},
+    {"sha384raw_unsalted_batch", {JOB_SHA384RAW, -1}, FAM_SHA512UNSALTED},
+    {"sha512raw_unsalted_batch", {JOB_SHA512RAW, -1}, FAM_SHA512UNSALTED},
     {"mysql3_unsalted_batch",  {JOB_MYSQL3, -1}, FAM_MYSQL3UNSALTED},
     {"hmac_rmd160_ksalt_batch", {JOB_HMAC_RMD160, -1}, FAM_HMAC_RMD160},
     {"hmac_rmd160_kpass_batch", {JOB_HMAC_RMD160_KPASS, -1}, FAM_HMAC_RMD160},
@@ -380,6 +395,9 @@ static const struct {
     {"hmac_streebog512_ksalt_batch",   {JOB_HMAC_STREEBOG512_KSALT, -1}, FAM_STREEBOG},
     {"sha512crypt_batch",              {JOB_SHA512CRYPT, -1}, FAM_SHA512CRYPT},
     {"sha256crypt_batch",              {JOB_SHA256CRYPT, -1}, FAM_SHA256CRYPT},
+    {"rmd160_unsalted_batch",          {JOB_RMD160, -1}, FAM_RMD160UNSALTED},
+    {"blake2s256_unsalted_batch",      {JOB_BLAKE2S256, -1}, FAM_BLAKE2S256UNSALTED},
+    {"bcrypt_batch",                   {JOB_BCRYPT, -1}, FAM_BCRYPT},
     {NULL, {-1}, 0}
 };
 #define KERN_ITER_IDX 2  /* index of md5salt_iter in kernel_map (for Maxiter override) */
@@ -927,6 +945,7 @@ int gpu_opencl_set_overflow(int dev_idx,
 
 void gpu_opencl_set_max_iter(int max_iter) { _max_iter = (max_iter < 1) ? 1 : max_iter; }
 void gpu_opencl_set_mask_resume(uint32_t start) { _mask_resume = start; }
+void gpu_opencl_set_salt_resume(uint32_t start) { _salt_resume = start; }
 void gpu_opencl_set_op(int op) { _gpu_op = op; }
 
 /* Mask mode state — accessed by gpujob for hit reconstruction.
@@ -1036,7 +1055,9 @@ uint32_t *gpu_opencl_dispatch_batch(int dev_idx,
     params.max_hits = GPU_MAX_HITS;
     params.overflow_count = _overflow_count;
     params.max_iter = (cat == GPU_CAT_ITER) ? (_max_iter - 1) : _max_iter;
-    params.num_masks = 0;
+    /* num_masks: 0 for salted types (unused), >0 for mask/unsalted.
+     * Iteration-only (no mask) dispatches with num_masks=1. */
+    params.num_masks = (cat == GPU_CAT_MASK || cat == GPU_CAT_UNSALTED) ? 1 : 0;
     params.mask_start = 0;
     params.n_prepend = gpu_mask_n_prepend;
     params.n_append = gpu_mask_n_append;
@@ -1079,6 +1100,10 @@ uint32_t *gpu_opencl_dispatch_batch(int dev_idx,
     int is_mask = ((cat == GPU_CAT_MASK || cat == GPU_CAT_UNSALTED) && gpu_mask_total > 0);
     int total_salts = is_salted ? d->salts_count : 0;
 
+    int salt_start_base = is_salted ? _salt_resume : 0;
+    total_salts = is_salted ? (total_salts - salt_start_base) : 0;
+    _salt_resume = 0;  /* consumed — reset for next dispatch */
+
     int salt_chunk = total_salts;
     if (d->max_dispatch > 0 && is_salted && num_words > 0) {
         salt_chunk = d->max_dispatch / num_words;
@@ -1110,8 +1135,8 @@ uint32_t *gpu_opencl_dispatch_batch(int dev_idx,
             if (params.num_masks > mask_chunk) params.num_masks = (uint32_t)mask_chunk;
             clEnqueueWriteBuffer(d->queue, d->b_params, CL_TRUE, 0, sizeof(params), &params, 0, NULL, NULL);
         } else if (is_salted) {
-            params.salt_start = chunk * salt_chunk;
-            params.num_salts = total_salts - params.salt_start;
+            params.salt_start = salt_start_base + chunk * salt_chunk;
+            params.num_salts = total_salts - chunk * salt_chunk;
             if (params.num_salts > salt_chunk) params.num_salts = salt_chunk;
             clEnqueueWriteBuffer(d->queue, d->b_params, CL_TRUE, 0, sizeof(params), &params, 0, NULL, NULL);
         } else if (chunk == 0) {
@@ -1131,7 +1156,13 @@ uint32_t *gpu_opencl_dispatch_batch(int dev_idx,
                     dev_idx, err, chunk, num_chunks, global);
             return NULL;
         }
-        clFinish(d->queue);
+        { cl_int ferr = clFinish(d->queue);
+          if (ferr != CL_SUCCESS) {
+            fprintf(stderr, "OpenCL GPU[%d] clFinish error: %d (chunk %d/%d)\n",
+                    dev_idx, ferr, chunk, num_chunks);
+            break;
+          }
+        }
     }
 
     if (!gk->tuned) {
@@ -1151,7 +1182,8 @@ uint32_t *gpu_opencl_dispatch_batch(int dev_idx,
         int is_sha256 = (_gpu_op == JOB_SHA256PASSSALT || _gpu_op == JOB_SHA256SALTPASS);
         int is_sha1 = (_gpu_op == JOB_SHA1PASSSALT || _gpu_op == JOB_SHA1SALTPASS || _gpu_op == JOB_SHA1DRU);
         int is_md5crypt = (_gpu_op == JOB_MD5CRYPT || _gpu_op == JOB_PHPBB3);
-        int stride = is_sha256 ? 11 : is_sha1 ? 8
+        int is_bcrypt = (_gpu_op == JOB_BCRYPT);
+        int stride = is_sha256 ? 11 : is_bcrypt ? 9 : is_sha1 ? 8
             : is_md5crypt ? 6
             : (_max_iter > 1 || cat == GPU_CAT_ITER || cat == GPU_CAT_SALTPASS) ? 7 : 6;
         clEnqueueReadBuffer(d->queue, d->b_hits, CL_TRUE, 0, raw_nhits * stride * sizeof(uint32_t), d->h_hits, 0, NULL, NULL);

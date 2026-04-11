@@ -41,6 +41,9 @@
 #include "gpu/metal_streebog_str.h"
 #include "gpu/metal_sha512crypt_str.h"
 #include "gpu/metal_sha256crypt_str.h"
+#include "gpu/metal_rmd160unsalted_str.h"
+#include "gpu/metal_blake2s256unsalted_str.h"
+#include "gpu/metal_bcrypt_str.h"
 
 /* Family IDs from gpujob.h FAM_* enum — Metal uses a subset */
 static const char *mtl_family_source[FAM_COUNT] = {
@@ -66,6 +69,9 @@ static const char *mtl_family_source[FAM_COUNT] = {
     [FAM_STREEBOG]          = metal_streebog_str,
     [FAM_SHA512CRYPT]       = metal_sha512crypt_str,
     [FAM_SHA256CRYPT]       = metal_sha256crypt_str,
+    [FAM_RMD160UNSALTED]    = metal_rmd160unsalted_str,
+    [FAM_BLAKE2S256UNSALTED] = metal_blake2s256unsalted_str,
+    [FAM_BCRYPT]             = metal_bcrypt_str,
 };
 
 /* ---- Metal state ---- */
@@ -140,6 +146,9 @@ static const struct {
     {"hmac_streebog512_ksalt_batch",   {JOB_HMAC_STREEBOG512_KSALT, -1}, FAM_STREEBOG},
     {"sha512crypt_batch",              {JOB_SHA512CRYPT, -1}, FAM_SHA512CRYPT},
     {"sha256crypt_batch",              {JOB_SHA256CRYPT, -1}, FAM_SHA256CRYPT},
+    {"rmd160_unsalted_batch",          {JOB_RMD160, -1}, FAM_RMD160UNSALTED},
+    {"blake2s256_unsalted_batch",      {JOB_BLAKE2S256, -1}, FAM_BLAKE2S256UNSALTED},
+    {"bcrypt_batch",                   {JOB_BCRYPT, -1}, FAM_BCRYPT},
     {NULL, {-1}, 0}
 };
 #define MTL_KERN_ITER_IDX 2
@@ -596,8 +605,39 @@ int gpu_metal_set_overflow(
     }
 }
 
+static id<MTLBuffer> buf_mask_desc = nil;
+
+int gpu_metal_set_mask(const uint8_t *sizes, const uint8_t tables[][256],
+                       int npre, int napp) {
+    if (!mtl_ready) return -1;
+    extern uint8_t gpu_mask_desc[];
+    extern uint8_t gpu_mask_sizes[];
+    extern int gpu_mask_n_prepend, gpu_mask_n_append;
+    extern uint64_t gpu_mask_total;
+
+    int ntotal = npre + napp;
+    gpu_mask_n_prepend = npre;
+    gpu_mask_n_append = napp;
+    memcpy(gpu_mask_desc, sizes, ntotal);
+    memcpy(gpu_mask_sizes, sizes, ntotal);
+    for (int i = 0; i < ntotal; i++)
+        memcpy(gpu_mask_desc + ntotal + i * 256, tables[i], 256);
+    gpu_mask_total = 1;
+    for (int i = 0; i < ntotal; i++)
+        gpu_mask_total *= sizes[i];
+
+    int bufsize = ntotal + ntotal * 256;
+    buf_mask_desc = [mtl_device newBufferWithBytes:gpu_mask_desc
+                                           length:bufsize
+                                          options:MTLResourceStorageModeShared];
+    fprintf(stderr, "Metal GPU: mask mode: %d prepend + %d append = %llu combinations\n",
+            npre, napp, (unsigned long long)gpu_mask_total);
+    return 0;
+}
+
 void gpu_metal_set_max_iter(int max_iter) {
     _max_iter = (max_iter < 1) ? 1 : max_iter;
+    (void)0;
 }
 
 static int _iter_count = 0;  /* PHPBB3: uniform iteration count for current dispatch group */
@@ -618,11 +658,51 @@ uint32_t *gpu_metal_dispatch_batch(
 {
     @autoreleasepool {
         *nhits_out = 0;
-        if (!mtl_ready || !_dispatch_bufs_ready || !mtl_pipelines[JOB_MD5SALT]) return NULL;
-        if (num_words <= 0 || _salts_count <= 0) return NULL;
+        if (!mtl_ready) return NULL;
+        if (num_words <= 0) return NULL;
 
-        /* Copy word data into persistent buffers */
-        size_t words_size = (size_t)num_words * 256;
+        /* Lazy init dispatch buffers if not yet allocated (unsalted-only runs) */
+        if (!_dispatch_bufs_ready) {
+            #define GPU_MAX_HITS 32768
+            _max_hits = GPU_MAX_HITS;
+            if (!buf_dispatch_hits)
+                buf_dispatch_hits = [mtl_device newBufferWithLength:_max_hits * 11 * sizeof(uint32_t)
+                                                            options:MTLResourceStorageModeShared];
+            if (!buf_dispatch_hit_count)
+                buf_dispatch_hit_count = [mtl_device newBufferWithLength:sizeof(uint32_t)
+                                                                 options:MTLResourceStorageModeShared];
+            if (!buf_dispatch_hexhashes)
+                buf_dispatch_hexhashes = [mtl_device newBufferWithLength:4096 * 256
+                                                                 options:MTLResourceStorageModeShared];
+            if (!buf_dispatch_hexlens)
+                buf_dispatch_hexlens = [mtl_device newBufferWithLength:4096 * sizeof(uint16_t)
+                                                                options:MTLResourceStorageModeShared];
+            if (!buf_dummy)
+                buf_dummy = [mtl_device newBufferWithLength:4
+                                                    options:MTLResourceStorageModeShared];
+            if (!buf_salt_data)
+                buf_salt_data = [mtl_device newBufferWithLength:16
+                                                        options:MTLResourceStorageModeShared];
+            if (!buf_salt_off)
+                buf_salt_off = [mtl_device newBufferWithLength:sizeof(uint32_t)
+                                                       options:MTLResourceStorageModeShared];
+            if (!buf_salt_len)
+                buf_salt_len = [mtl_device newBufferWithLength:sizeof(uint16_t)
+                                                       options:MTLResourceStorageModeShared];
+            _dispatch_bufs_ready = 1;
+        }
+        int cat = gpu_op_category(_gpu_op);
+        int is_unsalted = (cat == GPU_CAT_MASK || cat == GPU_CAT_UNSALTED);
+        if (_salts_count <= 0 && !is_unsalted) return NULL;
+
+        /* Copy word data into persistent buffers.
+         * Unsalted pre-padded: num_words can exceed GPUBATCH_MAX (up to 4096),
+         * use actual word_stride from caller (64/128/etc).
+         * Salted types: always 256-byte stride, max GPUBATCH_MAX words. */
+        int word_stride = is_unsalted ? 64 : 256;  /* TODO: pass actual stride */
+        if (is_unsalted && _gpu_op == JOB_SHA512) word_stride = 128;
+        if (is_unsalted && _gpu_op == JOB_SHA384) word_stride = 128;
+        size_t words_size = (size_t)num_words * word_stride;
         memcpy([buf_dispatch_hexhashes contents], hexhashes, words_size);
         memcpy([buf_dispatch_hexlens contents], hexlens, num_words * sizeof(uint16_t));
 
@@ -630,7 +710,7 @@ uint32_t *gpu_metal_dispatch_batch(
         MetalParams params;
         params.compact_mask = _compact_mask;
         params.num_words = num_words;
-        params.num_salts = _salts_count;
+        params.num_salts = is_unsalted ? 0 : _salts_count;
         params.salt_start = 0;
         params.max_probe = 256;
         params.hash_data_count = _hash_data_count;
@@ -638,6 +718,13 @@ uint32_t *gpu_metal_dispatch_batch(
         params.overflow_count = _overflow_count;
         params.max_iter = _max_iter;
         params.iter_count = _iter_count;
+        { extern int gpu_mask_n_prepend, gpu_mask_n_append;
+          extern uint64_t gpu_mask_total;
+          params.num_masks = is_unsalted ? (gpu_mask_total > 0 ? (uint32_t)gpu_mask_total : 1) : 0;
+          params.mask_start = 0;
+          params.n_prepend = gpu_mask_n_prepend;
+          params.n_append = gpu_mask_n_append;
+        }
 
         /* Salt chunking — avoid overwhelming the GPU with huge dispatches */
         int total_salts = _salts_count;
@@ -647,7 +734,7 @@ uint32_t *gpu_metal_dispatch_batch(
             if (salt_chunk < 1024) salt_chunk = 1024;
             if (salt_chunk > total_salts) salt_chunk = total_salts;
         }
-        int num_chunks = (total_salts + salt_chunk - 1) / salt_chunk;
+        int num_chunks = is_unsalted ? 1 : (total_salts + salt_chunk - 1) / salt_chunk;
 
         /* Zero hit counter */
         *(uint32_t *)[buf_dispatch_hit_count contents] = 0;
@@ -657,14 +744,18 @@ uint32_t *gpu_metal_dispatch_batch(
         id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
 
         id<MTLComputePipelineState> pipeline =
-            (_max_iter > 1 && mtl_pipeline_iter) ? mtl_pipeline_iter :
+            (!is_unsalted && _max_iter > 1 && mtl_pipeline_iter) ? mtl_pipeline_iter :
             (_gpu_op >= 0 && _gpu_op < JOB_DONE && mtl_pipelines[_gpu_op]) ? mtl_pipelines[_gpu_op] : nil;
-        if (!pipeline) { [cmdbuf release]; return NULL; }
+        if (!pipeline) {
+            fprintf(stderr, "Metal: no pipeline for op %d\n", _gpu_op);
+            [enc endEncoding]; [cmdbuf commit]; [cmdbuf waitUntilCompleted]; return NULL;
+        }
         [enc setComputePipelineState:pipeline];
         [enc setBuffer:buf_dispatch_hexhashes offset:0 atIndex:0];
         [enc setBuffer:buf_dispatch_hexlens  offset:0 atIndex:1];
         [enc setBuffer:buf_dispatch_hexlens  offset:0 atIndex:2]; /* unused slot */
-        [enc setBuffer:buf_salt_data     offset:0 atIndex:3];
+        [enc setBuffer:(is_unsalted ? (buf_mask_desc ? buf_mask_desc : buf_dummy) : buf_salt_data)
+                                         offset:0 atIndex:3];
         [enc setBuffer:buf_salt_off      offset:0 atIndex:4];
         [enc setBuffer:buf_salt_len      offset:0 atIndex:5];
         [enc setBuffer:buf_compact_fp    offset:0 atIndex:6];
@@ -683,6 +774,7 @@ uint32_t *gpu_metal_dispatch_batch(
 
         NSUInteger tpg = [pipeline maxTotalThreadsPerThreadgroup];
         if (tpg > 256) tpg = 256;
+        if (_gpu_op == JOB_BCRYPT && tpg > 8) tpg = 8;
         MTLSize groupSize = MTLSizeMake(tpg, 1, 1);
 
         /* Salt chunking: encode chunks into command buffer using setBytes for params */
@@ -695,7 +787,10 @@ uint32_t *gpu_metal_dispatch_batch(
                 [enc setBytes:&params length:sizeof(params) atIndex:8];
             }
 
-            uint64_t chunk_threads = (uint64_t)num_words * params.num_salts;
+            uint64_t chunk_threads = is_unsalted
+                ? (uint64_t)num_words * params.num_masks
+                : (uint64_t)num_words * params.num_salts;
+            /* debug removed */
             MTLSize gridSize = MTLSizeMake(chunk_threads, 1, 1);
             [enc dispatchThreads:gridSize threadsPerThreadgroup:groupSize];
         }
@@ -707,6 +802,7 @@ uint32_t *gpu_metal_dispatch_batch(
         /* Read back — return raw count and pointer */
         uint32_t raw_nhits = *(uint32_t *)[buf_dispatch_hit_count contents];
         *nhits_out = (int)raw_nhits;
+        /* readback */
 
         cmdbuf = nil; enc = nil;
 
@@ -793,7 +889,7 @@ int gpu_metal_submit_slot(int slot,
         { id<MTLComputePipelineState> ps =
             (_max_iter > 1 && mtl_pipeline_iter) ? mtl_pipeline_iter :
             (_gpu_op >= 0 && _gpu_op < JOB_DONE && mtl_pipelines[_gpu_op]) ? mtl_pipelines[_gpu_op] : nil;
-          if (!ps) { [cmdbuf release]; return -1; }
+          if (!ps) { [enc endEncoding]; [cmdbuf commit]; [cmdbuf waitUntilCompleted]; return -1; }
           [enc setComputePipelineState:ps];
         }
         [enc setBuffer:s->buf_hexhashes  offset:0 atIndex:0];
@@ -823,8 +919,13 @@ int gpu_metal_submit_slot(int slot,
         }
 
         uint64_t total_threads = (uint64_t)num_words * num_salts;
-        NSUInteger tpg = [mtl_pipelines[JOB_MD5SALT] maxTotalThreadsPerThreadgroup];
+        id<MTLComputePipelineState> active_ps =
+            (_max_iter > 1 && mtl_pipeline_iter) ? mtl_pipeline_iter :
+            mtl_pipelines[_gpu_op] ? mtl_pipelines[_gpu_op] : mtl_pipelines[JOB_MD5SALT];
+        NSUInteger tpg = [active_ps maxTotalThreadsPerThreadgroup];
         if (tpg > 256) tpg = 256;
+        /* bcrypt kernel partitions threadgroup sbox_pool by lid — cap to BCRYPT_WG_SIZE */
+        if (_gpu_op == JOB_BCRYPT && tpg > 8) tpg = 8;
         MTLSize gridSize = MTLSizeMake(total_threads, 1, 1);
         MTLSize groupSize = MTLSizeMake(tpg, 1, 1);
 

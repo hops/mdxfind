@@ -180,9 +180,37 @@ int Neon;
 #define mysha1 SHA1
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.288 2026/04/09 04:07:07 dlr Exp $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.296 2026/04/11 15:02:41 dlr Exp dlr $";
 /*
  * $Log: mdxfind.c,v $
+ * Revision 1.296  2026/04/11 15:02:41  dlr
+ * GPU -i/-n/-N: iteration-only dispatch (no mask), Metal mask upload infrastructure,
+ * hcdefaults SaltArray guard fix, Metal mask upload block
+ *
+ * Revision 1.295  2026/04/11 12:33:43  dlr
+ * Add FAM_BCRYPT to Metal compile family switch
+ *
+ * Revision 1.294  2026/04/10 16:44:40  dlr
+ * GPU iteration: add MD4, MD4UTF16, SHA512 to iter guard whitelist
+ *
+ * Revision 1.293  2026/04/10 16:23:42  dlr
+ * GPU iteration (-i) for MD5/SHA1/SHA256 unsalted, overflow retry for mask+salt,
+ * checkhash iter_num bug fix, format_rate final stats, Maxiter>1 stopgap guard
+ *
+ * Revision 1.292  2026/04/10 06:31:38  dlr
+ * GPU bcrypt kernel: working OpenCL implementation (JOB_BCRYPT/FAM_BCRYPT).
+ * Compact table 24-byte alignment fix, CL_KERNEL_COMPILE_WORK_GROUP_SIZE query,
+ * hit handler with BF_encode reconstruction, format_rate for final stats.
+ *
+ * Revision 1.291  2026/04/09 14:37:21  dlr
+ * GPU RMD160 (e17) and BLAKE2S256 (e844) unsalted kernels. RAW types in Metal/OpenCL gpu_op_category.
+ *
+ * Revision 1.290  2026/04/09 12:10:59  dlr
+ * Fix RAW binary iteration: my*() corrupts input buffer during computation. Hash into temp, memcpy back. Affects MD5RAW, SHA1RAW, SHA256RAW, SHA512RAW with -i 2+. Add GPU kernels: MD5RAW, SHA1RAW (=SQL5), SHA384RAW, SHA512RAW.
+ *
+ * Revision 1.289  2026/04/09 06:03:30  dlr
+ * Final session checkin: 47 new GPU algorithms, mask tables, bug fixes
+ *
  * Revision 1.288  2026/04/09 04:07:07  dlr
  * GPU SHA256CRYPT (e512/7400) and SHA512CRYPT (e513/1800). Full crypt-sha256/crypt-sha512 with salt parsing, variable rounds, P/S-bytes setup, iterated main loop.
  *
@@ -8403,9 +8431,14 @@ int gpu_try_pack_unsalted(struct jobg **pjobg, struct job *job, int appendlen, i
     case JOB_MD5: case JOB_MD4: case JOB_SHA1:
     case JOB_SHA224: case JOB_SHA256: case JOB_SHA256RAW:
     case JOB_WRL: case JOB_NTLMH:
-    case JOB_SQL5: case JOB_MYSQL3:
+    case JOB_SQL5: case JOB_SHA1RAW: case JOB_MD5RAW:
+    case JOB_MYSQL3:
     case JOB_STREEBOG_32: case JOB_STREEBOG_64:
+    case JOB_RMD160:
+    case JOB_BLAKE2S256:
        stride = 64; maxcount = 4096; maxpasslen = 55; break;
+    case JOB_SHA384RAW: case JOB_SHA512RAW:
+       stride = 128; maxcount = 2048; maxpasslen = 111; break;
     case JOB_SHA384: case JOB_SHA512:
        stride = 128; maxcount = 2048; maxpasslen = 111; break;
     case JOB_MD6256:
@@ -8577,10 +8610,23 @@ static int gpu_try_pack(struct jobg **pjobg, struct job *job,
     /* Iteration types need Maxiter > 1 to benefit from GPU */
     if (cat == GPU_CAT_ITER && Maxiter <= 1) return 0;
 
-    /* Mask mode: need masks configured, password must fit */
+    /* GPU kernels without iteration support: fall back to CPU when -i > 1.
+     * Exclude types with GPU iteration support. */
+    if (Maxiter > 1 && (cat == GPU_CAT_MASK || cat == GPU_CAT_UNSALTED ||
+                        cat == GPU_CAT_SALTPASS || cat == GPU_CAT_SALTED)) {
+        switch (job->op) {
+        case JOB_MD5: case JOB_SHA1: case JOB_SHA256:  /* have GPU iter */
+        case JOB_MD4: case JOB_MD4UTF16: case JOB_SHA512:
+            break;
+        default: return 0;
+        }
+    }
+
+    /* Mask mode: need masks configured, password must fit.
+     * Exception: iteration-only (-i > 1, no -n) dispatches with num_masks=1. */
     if (cat == GPU_CAT_MASK) {
         extern uint64_t gpu_mask_total;
-        if (gpu_mask_total == 0) return 0;
+        if (gpu_mask_total == 0 && Maxiter <= 1) return 0;
         if (job->clen <= 0 || !job->pass) return 0;
     }
 
@@ -9020,9 +9066,9 @@ while (1) {
    * to ensure GPU gets full batches. */
   unsigned char *gpu_done = NULL;
   if (gpujob_available() && gpu_op_category(job->op) == GPU_CAT_MASK &&
-      (MaskAppendLen > 0 || MaskPrependLen > 0) && !Rules && !Email) {
+      ((MaskAppendLen > 0 || MaskPrependLen > 0) || Maxiter > 1) && !Rules && !Email) {
     extern uint64_t gpu_mask_total;
-    if (gpu_mask_total > 0) {
+    if (gpu_mask_total > 0 || Maxiter > 1) {
       static __thread unsigned char *gpu_done_buf = NULL;
       static __thread int gpu_done_size = 0;
       int nbytes = (job->numline + 7) / 8;
@@ -11941,6 +11987,15 @@ nextbb:
 BC_Start:
                 if (len > MAXLINE)
                   break;
+#ifdef GPU_ENABLED
+                if (!snap_valid) {
+                  nsalts_job = build_salt_snapshot(saltsnap, saltpool,
+                                  Typesalt[JOB_BCRYPT], tsalt, Printall);
+                  snap_valid = 1;
+                }
+                if (nsalts_job > 0 && gpu_try_pack(&my_jobg, job, NULL, nsalts_job, 0))
+                  break;
+#endif
                 /* iterate unique salt prefixes from Typesalt[JOB_BCRYPT] */
                 linebuf[0] = 0;
                 cur[len] = 0;
@@ -22537,11 +22592,15 @@ MD_SHA_start:
                 cur = (char *) curin.h;
                 len = 16;
               case JOB_MD5RAW:
-                mymd5(cur, len, md5buf.h);
-                cur = (char *) md5buf.h;
-                len = 16;
-                x = 1;
-                goto MDstart;
+                hashcnt += Maxiter;
+                for (x = 1; x <= Maxiter; x++) {
+                  mymd5(cur, len, md5buf.h);
+                  cur = (char *) curin.h;
+                  len = 16;
+		  memcpy(cur,md5buf.h,len);
+                  checkhash((union HashU *)md5buf.h, 32, x, job);
+                }
+                break;
 
               case JOB_MD5SPECAM:
                 if (len > MAXLINE)
@@ -24617,11 +24676,15 @@ sha1md5md5uc:
                 len = 32;
 
               case JOB_SHA1RAW:
-                mysha1(cur, len, mdcur[0].h);
-                cur = (char *) mdcur[0].h;
-                len = 20;
-                x = 1;
-                goto SHA1_start;
+                hashcnt += Maxiter;
+                for (x = 1; x <= Maxiter; x++) {
+                  mysha1(cur, len, md5buf.h);
+                  cur = (char *) curin.h;
+                  len = 20;
+                  memcpy(cur, md5buf.h, len);
+                  checkhash((union HashU *)md5buf.h, 40, x, job);
+                }
+                break;
 
               case JOB_SHA1UC:
                 mysha1(cur, len, curin.h);
@@ -25699,9 +25762,10 @@ sha1sha256:
               case JOB_SHA256RAW:
                 hashcnt += Maxiter;
                 for (x = 1; x <= Maxiter; x++) {
-                  mysha256(cur, len, curin.h);
+                  mysha256(cur, len, md5buf.h);
                   cur = (char *) curin.h;
                   len = 32;
+                  memcpy(cur, md5buf.h, len);
                   checkhash(&curin, 64, x, job);
                 }
                 break;
@@ -25879,9 +25943,10 @@ sha1sha256:
               case JOB_SHA512RAW:
                 hashcnt += Maxiter;
                 for (x = 1; x <= Maxiter; x++) {
-                  mysha512(cur, len, curin.h);
+                  mysha512(cur, len, md5buf.h);
                   cur = (char *) curin.h;
                   len = 64;
+                  memcpy(cur, md5buf.h, len);
                   checkhash(&curin, 128, x, job);
                 }
                 break;
@@ -25985,9 +26050,10 @@ sha1sha256:
                 for (x = 1; x <= Maxiter; x++) {
                   sph_sha224_init(&sha256ctx);
                   sph_sha224(&sha256ctx, cur, len);
-                  sph_sha224_close(&sha256ctx, curin.h);
+                  sph_sha224_close(&sha256ctx, md5buf.h);
                   cur = (char *) curin.h;
                   len = 28;
+                  memcpy(cur, md5buf.h, len);
                   checkhash(&curin, 56, x, job);
                 }
                 break;
@@ -26044,9 +26110,10 @@ SHA224_start:
                 for (x = 1; x <= Maxiter; x++) {
                   sph_sha384_init(&sha512ctx);
                   sph_sha384(&sha512ctx, cur, len);
-                  sph_sha384_close(&sha512ctx, curin.h);
+                  sph_sha384_close(&sha512ctx, md5buf.h);
                   cur = (char *) curin.h;
                   len = 48;
+                  memcpy(cur, md5buf.h, len);
                   checkhash(&curin, 96, x, job);
                 }
                 break;
@@ -34381,6 +34448,69 @@ void build_compact_table(void) {
             100.0 * CompactUsed / tsize,
             overflow_count, bt);
   }
+  /* Decode bcrypt hash bytes into compact table for GPU probing.
+   * Each bcrypt string is $2x$CC$<22-char salt><31-char hash>.
+   * Decode the 31-char base64 hash into 23 raw bytes (big-endian from BF_encode),
+   * byte-swap to little-endian uint32 words, and insert into compact table. */
+  { static const unsigned char bf_atoi64[0x60] = {
+      64,64,64,64,64,64,64,64,64,64,64,64,64,64, 0, 1,
+      54,55,56,57,58,59,60,61,62,63,64,64,64,64,64,64,
+      64, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15,16,
+      17,18,19,20,21,22,23,24,25,26,27,64,64,64,64,64,
+      64,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,
+      43,44,45,46,47,48,49,50,51,52,53,64,64,64,64,64
+    };
+    char bcline[128];
+    Word_t *BPV;
+    int bc_added = 0;
+    bcline[0] = 0;
+    JSLF(BPV, JudyJ[JOB_BCRYPT], (unsigned char *)bcline);
+    /* Ensure HashDataBuf is allocated (may be NULL if no hex hashes were loaded) */
+    if (BPV && !HashDataBuf) {
+      HashDataBufCap = 65536;
+      HashDataBuf = malloc(HashDataBufCap);
+      HashDataOff = malloc(65536 * sizeof(size_t));
+      HashDataLen = malloc(65536 * sizeof(unsigned short));
+      HashDataFlags = malloc(65536 * sizeof(unsigned short));
+    }
+    while (BPV) {
+      int pfx = (bcline[2] == 'k') ? 28 : 29;
+      const unsigned char *src = (unsigned char *)bcline + pfx;
+      unsigned char raw[24];
+      unsigned char *dp = raw;
+      unsigned char *end = raw + 23;
+      /* BF_decode: 31 base64 chars -> 23 bytes */
+      while (dp < end) {
+        unsigned int c1 = bf_atoi64[(*src++) - 0x20];
+        unsigned int c2 = bf_atoi64[(*src++) - 0x20];
+        *dp++ = (c1 << 2) | ((c2 & 0x30) >> 4);
+        if (dp >= end) break;
+        unsigned int c3 = bf_atoi64[(*src++) - 0x20];
+        *dp++ = ((c2 & 0x0F) << 4) | ((c3 & 0x3C) >> 2);
+        if (dp >= end) break;
+        unsigned int c4 = bf_atoi64[(*src++) - 0x20];
+        *dp++ = ((c3 & 0x03) << 6) | c4;
+      }
+      /* Raw decoded bytes are BE from BF_encode. On a LE host, reading them
+       * as native uint32 gives the same values the GPU kernel produces after
+       * its BE-to-LE byte-swap. No additional swap needed here. */
+      /* Append to HashDataBuf and insert into compact table */
+      if (HashDataBufUsed + 24 <= HashDataBufCap) {
+        HashDataOff[HashDataCount] = HashDataBufUsed;
+        HashDataLen[HashDataCount] = 23;
+        HashDataFlags[HashDataCount] = 0;
+        memcpy(HashDataBuf + HashDataBufUsed, raw, 23);
+        raw[23] = 0;  /* pad to 24 bytes for 4-byte alignment */
+        HashDataBufUsed += 24;
+        compact_insert();
+        HashDataCount++;
+        bc_added++;
+      }
+      JSLN(BPV, JudyJ[JOB_BCRYPT], (unsigned char *)bcline);
+    }
+    if (bc_added)
+      fprintf(stderr, "Compact table: added %d bcrypt hashes for GPU probing\n", bc_added);
+  }
 #ifdef GPU_ENABLED
   /* Only initialize GPU if at least one GPU-capable hash type is selected */
   { int need_gpu = 0;
@@ -34408,7 +34538,9 @@ void build_compact_table(void) {
                       JOB_HMAC_STREEBOG512_KPASS, JOB_HMAC_STREEBOG512_KSALT,
                       JOB_SHA512PASSSALT, JOB_SHA512SALTPASS,
                       JOB_SHA512CRYPT, JOB_SHA256CRYPT,
-                      JOB_SQL5, JOB_MYSQL3, JOB_DESCRYPT, -1 };
+                      JOB_MD5RAW, JOB_SHA1RAW, JOB_SHA384RAW, JOB_SHA512RAW,
+                      JOB_SQL5, JOB_MYSQL3, JOB_DESCRYPT,
+                      JOB_RMD160, JOB_BLAKE2S256, JOB_BCRYPT, -1 };
     for (int gi = 0; gpu_ops[gi] >= 0; gi++) {
       Word_t grc;
       J1T(grc, Dohash, gpu_ops[gi]);
@@ -36666,7 +36798,11 @@ static void load_hash_file(gzFile gi, const char *filename, Pvoid_t *pDoload) {
         memcpy(bc_salt, line, pfx);
         bc_salt[pfx] = 0;
         JSLI(PV, Typesalt[JOB_BCRYPT], (unsigned char *)bc_salt);
-        if (PV) { if ((*PV)++ == 0) {Saltloaded[JOB_BCRYPT]++;} }
+        if (PV) { if ((*PV)++ == 0) {
+          Saltloaded[JOB_BCRYPT]++;
+          Typesaltcnt[JOB_BCRYPT]++;
+          Typesaltbytes[JOB_BCRYPT] += pfx + 1;
+        } }
       }
       Foundcnt[JOB_BCRYPT]++;
       continue;
@@ -39319,6 +39455,8 @@ int main(int argc, char **argv) {
                   x == JOB_HMAC_STREEBOG512_KPASS || x == JOB_HMAC_STREEBOG512_KSALT ||
                   x == JOB_SHA512PASSSALT || x == JOB_SHA512SALTPASS ||
                   x == JOB_SHA512CRYPT || x == JOB_SHA256CRYPT ||
+                  x == JOB_MD5RAW || x == JOB_SHA1RAW ||
+                  x == JOB_SHA384RAW || x == JOB_SHA512RAW ||
                   x == JOB_SQL5 || x == JOB_MYSQL3)
                 gpu = " [GPU]";
 #endif
@@ -40481,7 +40619,7 @@ badrule:
 	    for (di = 0; hcdefaults[di].salt; di++) {
 	      int j = hcdefaults[di].job;
 	      J1T(RC, Dohash, j);
-	      if (RC && !Typesalt[j]) {
+	      if (RC && !Typesalt[j] && !SaltArray) {
 	        JSLI(PV, Typesalt[j], (unsigned char *)hcdefaults[di].salt);
 	        if (PV) *PV = 1000000;
 	      }
@@ -43510,12 +43648,13 @@ usage:
 	  case JOB_MD5sub8_24SALT: fam = 1u << FAM_MD5SALT; break;
 	  case JOB_MD5SALTPASS: case JOB_MD5PASSSALT: fam = 1u << FAM_MD5SALTPASS; break;
 	  case JOB_MD5: case JOB_MD5UC: fam = (1u << FAM_MD5SALT) | (1u << FAM_MD5UNSALTED); break;
+	  case JOB_MD5RAW: fam = 1u << FAM_MD5UNSALTED; break;
 	  case JOB_MD4: case JOB_NTLMH: fam = 1u << FAM_MD4UNSALTED; break;
-	  case JOB_SHA1: fam = 1u << FAM_SHA1UNSALTED; break;
+	  case JOB_SHA1: case JOB_SHA1RAW: fam = 1u << FAM_SHA1UNSALTED; break;
 	  case JOB_SHA256: case JOB_SHA256RAW: fam = 1u << FAM_SHA256UNSALTED; break;
 	  case JOB_SHA224: fam = 1u << FAM_SHA256UNSALTED; break;
-	  case JOB_SHA512: fam = 1u << FAM_SHA512UNSALTED; break;
-	  case JOB_SHA384: fam = 1u << FAM_SHA512UNSALTED; break;
+	  case JOB_SHA512: case JOB_SHA512RAW: fam = 1u << FAM_SHA512UNSALTED; break;
+	  case JOB_SHA384: case JOB_SHA384RAW: fam = 1u << FAM_SHA512UNSALTED; break;
 	  case JOB_WRL: fam = 1u << FAM_WRLUNSALTED; break;
 	  case JOB_MD6256: fam = 1u << FAM_MD6256UNSALTED; break;
 	  case JOB_KECCAK224: case JOB_KECCAK256: case JOB_KECCAK384: case JOB_KECCAK512:
@@ -43549,6 +43688,7 @@ usage:
 	  case JOB_SHA512CRYPT: fam = 1u << FAM_SHA512CRYPT; break;
 	  case JOB_SHA256CRYPT: fam = 1u << FAM_SHA256CRYPT; break;
 	  case JOB_DESCRYPT: fam = 1u << FAM_DESCRYPT; break;
+	  case JOB_BCRYPT: fam = 1u << FAM_BCRYPT; break;
 	}
 	if (fam & FAM_MD5SALT) {
 	  linehints[lsi].lineswanted = UINT_MAX;
@@ -43580,12 +43720,13 @@ usage:
             case JOB_MD5sub8_24SALT: fam |= 1u << FAM_MD5SALT; break;
             case JOB_MD5SALTPASS: case JOB_MD5PASSSALT: fam |= 1u << FAM_MD5SALTPASS; break;
             case JOB_MD5: case JOB_MD5UC: fam |= (1u << FAM_MD5ITER) | (1u << FAM_MD5MASK) | (1u << FAM_MD5UNSALTED); break;
+            case JOB_MD5RAW: fam |= 1u << FAM_MD5UNSALTED; break;
             case JOB_MD4: case JOB_NTLMH: fam |= 1u << FAM_MD4UNSALTED; break;
-            case JOB_SHA1: fam |= 1u << FAM_SHA1UNSALTED; break;
+            case JOB_SHA1: case JOB_SHA1RAW: fam |= 1u << FAM_SHA1UNSALTED; break;
             case JOB_SHA256: case JOB_SHA256RAW: fam |= 1u << FAM_SHA256UNSALTED; break;
             case JOB_SHA224: fam |= 1u << FAM_SHA256UNSALTED; break;
-            case JOB_SHA512: fam |= 1u << FAM_SHA512UNSALTED; break;
-            case JOB_SHA384: fam |= 1u << FAM_SHA512UNSALTED; break;
+            case JOB_SHA512: case JOB_SHA512RAW: fam |= 1u << FAM_SHA512UNSALTED; break;
+            case JOB_SHA384: case JOB_SHA384RAW: fam |= 1u << FAM_SHA512UNSALTED; break;
             case JOB_WRL: fam |= 1u << FAM_WRLUNSALTED; break;
             case JOB_MD6256: fam |= 1u << FAM_MD6256UNSALTED; break;
             case JOB_KECCAK224: case JOB_KECCAK256: case JOB_KECCAK384: case JOB_KECCAK512:
@@ -43622,6 +43763,7 @@ usage:
             case JOB_SHA512CRYPT: fam |= 1u << FAM_SHA512CRYPT; break;
             case JOB_SHA256CRYPT: fam |= 1u << FAM_SHA256CRYPT; break;
             case JOB_DESCRYPT: fam |= 1u << FAM_DESCRYPT; break;
+            case JOB_BCRYPT: fam |= 1u << FAM_BCRYPT; break;
           }
 	  if (fam & FAM_MD5SALT) {
 	    linehints[lsi].lineswanted = UINT_MAX;
@@ -43632,8 +43774,8 @@ usage:
         }
         if (finalfam) gpu_opencl_compile_families(finalfam);
       }
-      /* Upload mask descriptor to GPU if mask mode is active */
-      if ((MaskPrependLen > 0 || MaskAppendLen > 0 || MaskLen > 0) && gpu_opencl_available()) {
+      /* Upload mask descriptor to GPU if mask mode is active (OpenCL) */
+      if ((MaskPrependLen > 0 || MaskAppendLen > 0 || MaskLen > 0) && gpujob_available()) {
         int gpu_mask_ok = 1;
         static uint8_t mask_sizes[MAX_MASK_POS * 2];
         static uint8_t mask_tables[MAX_MASK_POS * 2][256];
@@ -43696,8 +43838,60 @@ usage:
             }
           }
         }
-        if (gpu_mask_ok && (npre > 0 || napp > 0))
+        if (gpu_mask_ok && (npre > 0 || napp > 0)) {
+#if defined(OPENCL_GPU)
           gpu_opencl_set_mask(mask_sizes, mask_tables, npre, napp);
+#elif defined(METAL_GPU)
+          gpu_metal_set_mask(mask_sizes, mask_tables, npre, napp);
+#endif
+        }
+      }
+#endif
+#ifdef METAL_GPU
+      /* Upload mask descriptor to Metal GPU if mask mode is active */
+      if ((MaskPrependLen > 0 || MaskAppendLen > 0 || MaskLen > 0) && gpujob_available()) {
+        int gpu_mask_ok = 1;
+        static uint8_t mask_sizes[MAX_MASK_POS * 2];
+        static uint8_t mask_tables[MAX_MASK_POS * 2][256];
+        int npre = 0, napp = 0;
+        for (int mi = 0; mi < MaskPrependLen && gpu_mask_ok; mi++) {
+          int cid = MaskPrependPattern[mi].classid;
+          if (cid == MASK_LITERAL) {
+            mask_sizes[npre] = 1; memset(mask_tables[npre], 0, 256);
+            mask_tables[npre][0] = MaskPrependPattern[mi].literal; npre++;
+          } else if (cid >= 0 && cid < MASK_MAX_CLASSES && MaskClasses[cid].count > 0) {
+            mask_sizes[npre] = (uint8_t)MaskClasses[cid].count;
+            memcpy(mask_tables[npre], MaskClasses[cid].chars, 256); npre++;
+          } else gpu_mask_ok = 0;
+        }
+        for (int mi = 0; mi < MaskAppendLen && gpu_mask_ok; mi++) {
+          int ti = npre + napp;
+          int cid = MaskAppendPattern[mi].classid;
+          if (cid == MASK_LITERAL) {
+            mask_sizes[ti] = 1; memset(mask_tables[ti], 0, 256);
+            mask_tables[ti][0] = MaskAppendPattern[mi].literal; napp++;
+          } else if (cid >= 0 && cid < MASK_MAX_CLASSES && MaskClasses[cid].count > 0) {
+            mask_sizes[ti] = (uint8_t)MaskClasses[cid].count;
+            memcpy(mask_tables[ti], MaskClasses[cid].chars, 256); napp++;
+          } else gpu_mask_ok = 0;
+        }
+        if (gpu_mask_ok && npre == 0 && napp == 0 && MaskLen > 0) {
+          for (int mi = 0; mi < MaskLen && gpu_mask_ok; mi++) {
+            int cid = MaskPattern[mi].classid;
+            int ti = MaskPrepend ? npre : (npre + napp);
+            if (cid == MASK_LITERAL) {
+              mask_sizes[ti] = 1; memset(mask_tables[ti], 0, 256);
+              mask_tables[ti][0] = MaskPattern[mi].literal;
+              if (MaskPrepend) npre++; else napp++;
+            } else if (cid >= 0 && cid < MASK_MAX_CLASSES && MaskClasses[cid].count > 0) {
+              mask_sizes[ti] = (uint8_t)MaskClasses[cid].count;
+              memcpy(mask_tables[ti], MaskClasses[cid].chars, 256);
+              if (MaskPrepend) npre++; else napp++;
+            } else gpu_mask_ok = 0;
+          }
+        }
+        if (gpu_mask_ok && (npre > 0 || napp > 0))
+          gpu_metal_set_mask(mask_sizes, mask_tables, npre, napp);
       }
 #endif
     }
@@ -43788,7 +43982,9 @@ reprocess:
 	      linehints[x].lineswanted /= Livesalts[x];
 	    if (MaskTotal > 1)
 	      linehints[x].lineswanted /= MaskTotal;
-	    if (linehints[x].lineswanted < 512)
+	    if (linehints[x].rate < 100)
+	      linehints[x].lineswanted = 1;
+	    else if (linehints[x].lineswanted < 512)
 	      linehints[x].lineswanted = 512;
 	    numline = linehints[x].lineswanted;
 	    if (Email) numline = 1;
@@ -43896,7 +44092,10 @@ reprocess:
   if (wtime <= 0)
     wtime = 1.0;
   fprintf(stderr, "%.2f seconds hashing, %s total hash calculations\n", wtime, commify(Tothash));
-  fprintf(stderr, "%.2fM hashes per second (approx)\n", (double) Tothash / 1000000.0 / wtime);
+  { double hps; char *mult;
+    format_rate((double) Tothash / wtime, &hps, &mult);
+    fprintf(stderr, "%.2f%s hashes per second (approx)\n", hps, mult);
+  }
 
   fprintf(stderr, "%s total files\n", commify(Totalfiles));
   for (y = 1; Types[y]; y++) {

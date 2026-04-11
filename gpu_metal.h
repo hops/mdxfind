@@ -120,6 +120,8 @@ int gpu_metal_set_overflow(
 /* Set maximum iteration count for GPU dispatch. Default 1.
  * Each iteration computes MD5(hex(previous_result)) and probes the compact table. */
 void gpu_metal_set_max_iter(int max_iter);
+int gpu_metal_set_mask(const uint8_t *sizes, const uint8_t tables[][256],
+                       int npre, int napp);
 
 /* Dispatch a batch of pre-hashed words against all pre-loaded salts.
  * hexhashes:   packed hex hashes, 256 bytes per word (only hexlens[i] used)

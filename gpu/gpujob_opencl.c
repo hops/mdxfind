@@ -13,6 +13,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef bswap_32
+#define bswap_32(x) __builtin_bswap32(x)
+#endif
 #include <stdint.h>
 #ifdef _WIN32
 #include <windows.h>
@@ -469,17 +472,18 @@ void gpujob(void *arg) {
             int is_sha1 = (g->op == JOB_SHA1PASSSALT || g->op == JOB_SHA1SALTPASS || g->op == JOB_SHA1DRU ||
                             g->op == JOB_HMAC_SHA1 || g->op == JOB_HMAC_SHA1_KPASS);
             int is_md5crypt = (g->op == JOB_MD5CRYPT || g->op == JOB_PHPBB3);
-            int hit_stride = is_sha256 ? 11 : is_sha1 ? 8
+            int is_bcrypt = (g->op == JOB_BCRYPT);
+            int hit_stride = is_sha256 ? 11 : is_bcrypt ? 9 : is_sha1 ? 8
                 : is_md5crypt ? 6
                 : (Maxiter > 1 || op_cat == GPU_CAT_ITER || op_cat == GPU_CAT_SALTPASS) ? 7 : 6;
-            int hash_words = is_sha256 ? 8 : is_sha1 ? 5 : 4;
+            int hash_words = is_sha256 ? 8 : is_bcrypt ? 6 : is_sha1 ? 5 : 4;
             int hexlen = is_sha256 ? 64 : is_sha1 ? 40 : 32;
             int overflow = (nhits > GPU_MAX_RETURN);
 
-            /* If overflow on a mask batch, find the highest mask_idx among stored
-             * hits and resume from there on the next dispatch. Up to num_words
-             * duplicates at the boundary are filtered by checkhash. */
-            uint32_t max_mask_idx = 0;
+            /* Track highest mask/salt index among stored hits for overflow retry.
+             * On overflow, resume from this point on the next dispatch.
+             * Up to num_words duplicates at the boundary are filtered by checkhash. */
+            uint32_t max_salt_idx = 0;
 
             for (int h = 0; h < stored; h++) {
                 uint32_t *entry = hits + h * hit_stride;
@@ -505,6 +509,7 @@ void gpujob(void *arg) {
                     synthetic_job.Ruleindex = (widx < GPUBATCH_MAX) ? g->ruleindex[widx] : 0;
                     uint32_t midx = entry[1];
                     if (midx > max_mask_idx) max_mask_idx = midx;
+                    if ((uint32_t)sidx > max_salt_idx) max_salt_idx = (uint32_t)sidx;
                     char *base_word;
                     int blen;
                     if (g->word_stride && widx < 4096) {
@@ -535,9 +540,10 @@ void gpujob(void *arg) {
                     memcpy(synthetic_job.line, cand, clen + 1);
                     synthetic_job.clen = clen;
                     synthetic_job.pass = synthetic_job.line;
-                    checkhash(&curin, hexlen, 1, &synthetic_job);
+                    checkhash(&curin, hexlen, iter_num, &synthetic_job);
                 } else {
                     /* Non-mask path: set up synthetic_job from per-word metadata */
+                    if ((uint32_t)sidx > max_salt_idx) max_salt_idx = (uint32_t)sidx;
                     char *pass = &g->passbuf[g->passoff[widx]];
                     int plen = g->passlen[widx];
                     memcpy(synthetic_job.line, pass, plen);
@@ -585,6 +591,50 @@ void gpujob(void *arg) {
                         synthetic_job.clen = cplen;
                         prfound(&synthetic_job, desbuf);
                     }
+                } else if (g->op == JOB_BCRYPT) {
+                    if (sidx >= nsalts_packed) continue;
+                    int snap_idx = pack_map[sidx];
+                    /* Reconstruct bcrypt hash string from GPU output.
+                     * GPU hit gives 6 LE uint32 words = 24 bytes (23 meaningful).
+                     * BF_encode expects BE byte stream, so swap each word back. */
+                    unsigned char *raw = (unsigned char *)&curin.i[0];
+                    /* BF_encode: 23 bytes -> 31 base64 chars */
+                    static const char bf_itoa64[] =
+                        "./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+                    char hashb64[32];
+                    { const unsigned char *sp = raw;
+                      char *dp = hashb64;
+                      int bytes_left = 23;
+                      while (bytes_left > 0) {
+                        unsigned int c1 = *sp++;
+                        *dp++ = bf_itoa64[c1 >> 2];
+                        c1 = (c1 & 0x03) << 4;
+                        if (--bytes_left <= 0) { *dp++ = bf_itoa64[c1]; break; }
+                        unsigned int c2 = *sp++;
+                        c1 |= c2 >> 4;
+                        *dp++ = bf_itoa64[c1];
+                        c1 = (c2 & 0x0f) << 2;
+                        if (--bytes_left <= 0) { *dp++ = bf_itoa64[c1]; break; }
+                        unsigned int c3 = *sp++;
+                        c1 |= c3 >> 6;
+                        *dp++ = bf_itoa64[c1];
+                        *dp++ = bf_itoa64[c3 & 0x3f];
+                        bytes_left--;
+                      }
+                      *dp = 0;
+                    }
+                    /* Build full hash: salt_setting + hash_base64 */
+                    char *sp2 = saltsnap[snap_idx].salt;
+                    int splen = saltsnap[snap_idx].saltlen;
+                    char fullhash[128];
+                    memcpy(fullhash, sp2, splen);
+                    memcpy(fullhash + splen, hashb64, 32);
+                    Word_t *HPV;
+                    JSLG(HPV, JudyJ[JOB_BCRYPT], (unsigned char *)fullhash);
+                    if (HPV && __sync_bool_compare_and_swap(HPV, 0, 1)) {
+                        PV_DEC(saltsnap[snap_idx].PV);
+                        prfound(&synthetic_job, fullhash);
+                    }
                 } else {
                     if (sidx >= nsalts_packed) continue;
                     int snap_idx = pack_map[sidx];
@@ -607,15 +657,25 @@ void gpujob(void *arg) {
                 } /* end non-mask else */
             }
 
-            /* Hit buffer overflow: reprocess words that may have lost hits on CPU.
-             * word_hit[wi] is set for words that appeared in the stored hits.
-             * Words WITHOUT hits may have been dropped — recompute on CPU. */
+            /* Hit buffer overflow: re-dispatch same batch to GPU starting from
+             * the highest index seen.  Up to 4096 duplicates at the boundary
+             * are acceptable — filtered by checksalthash / checkhash. */
             if (overflow) {
-                for (int wi = 0; wi < g->count; wi++) {
+                dispatch_retry = 1;
+                if (op_cat == GPU_CAT_MASK || op_cat == GPU_CAT_UNSALTED) {
+                    gpu_opencl_set_mask_resume(max_mask_idx);
+                } else if (op_cat == GPU_CAT_SALTED || op_cat == GPU_CAT_SALTPASS) {
+                    gpu_opencl_set_salt_resume(max_salt_idx);
+                }
+            }
+
+            if (0) {  /* --- dead CPU fallback (replaced by GPU retry above) --- */
+                int wi, si;
+                for (wi = 0; wi < g->count; wi++) {
                     synthetic_job.clen = g->clen[wi];
                     synthetic_job.Ruleindex = g->ruleindex[wi];
 
-                    for (int si = 0; si < nsalts_packed; si++) {
+                    for (si = 0; si < nsalts_packed; si++) {
                         int snap_idx = pack_map[si];
                         char *s1 = saltsnap[snap_idx].salt;
                         int saltlen = saltsnap[snap_idx].saltlen;
@@ -812,16 +872,15 @@ void gpujob(void *arg) {
             synthetic_job.outlen = 0;
         }
 
-        /* Mask overflow retry: resume from the highest mask_idx seen + 1 */
-        if (dispatch_retry) {
-            gpu_opencl_set_mask_resume(max_mask_idx);
-        }
+        /* Overflow retry already set up above (mask_resume or salt_resume) */
 
         } while (dispatch_retry);  /* retry mask dispatch on overflow */
 
         /* Hash count: added once per batch (retries don't add extra computation) */
-        if (op_cat == GPU_CAT_MASK)
-            hashcnt += (uint64_t)g->count * gpu_mask_total;
+        if (op_cat == GPU_CAT_MASK) {
+            uint64_t masks = gpu_mask_total > 0 ? gpu_mask_total : 1;
+            hashcnt += (uint64_t)g->count * masks * Maxiter;
+        }
         else if (op_cat == GPU_CAT_ITER)
             hashcnt += (uint64_t)g->count * (Maxiter - 1);
         else if (g->op == JOB_PHPBB3) {
@@ -1121,6 +1180,7 @@ int gpu_op_category(int op) {
     case JOB_HMAC_RMD160: case JOB_HMAC_RMD160_KPASS:
     case JOB_HMAC_RMD320: case JOB_HMAC_RMD320_KPASS:
     case JOB_HMAC_BLAKE2S:
+    case JOB_BCRYPT:
         return GPU_CAT_SALTPASS;
     case JOB_MD5_MD5SALTMD5PASS:
         return GPU_CAT_SALTED;
@@ -1139,8 +1199,12 @@ int gpu_op_category(int op) {
     case JOB_MD6256:
     case JOB_KECCAK224: case JOB_KECCAK256: case JOB_KECCAK384: case JOB_KECCAK512:
     case JOB_SHA3_224: case JOB_SHA3_256: case JOB_SHA3_384: case JOB_SHA3_512:
-    case JOB_SQL5: case JOB_MYSQL3:
+    case JOB_SQL5: case JOB_SHA1RAW: case JOB_MD5RAW:
+    case JOB_SHA384RAW: case JOB_SHA512RAW:
+    case JOB_MYSQL3:
     case JOB_STREEBOG_32: case JOB_STREEBOG_64:
+    case JOB_RMD160:
+    case JOB_BLAKE2S256:
         return GPU_CAT_MASK;
     case JOB_HMAC_STREEBOG256_KPASS: case JOB_HMAC_STREEBOG256_KSALT:
     case JOB_HMAC_STREEBOG512_KPASS: case JOB_HMAC_STREEBOG512_KSALT:

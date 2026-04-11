@@ -52,10 +52,15 @@ extern int build_salt_snapshot(void *snap, char *pool,
                 void *judy, char *keybuf, int printall);
 extern int *Typesaltcnt;
 extern int *Typesaltbytes;
+extern Pvoid_t JudyJ[];
 extern char phpitoa64[];
 extern void prfound(struct job *, char *);
 int gpu_mask_n_prepend = 0, gpu_mask_n_append = 0;
-uint8_t gpu_mask_desc[64];
+#ifndef MAX_MASK_POS
+#define MAX_MASK_POS 16
+#endif
+uint8_t gpu_mask_desc[MAX_MASK_POS + MAX_MASK_POS * 256];
+uint8_t gpu_mask_sizes[MAX_MASK_POS];
 
 /* Mask charset helpers — must match kernel's charset_size/charset_char */
 static const char *mask_charsets[] = {
@@ -64,16 +69,15 @@ static const char *mask_charsets[] = {
 };
 static const int mask_csizes[] = { 10, 26, 26, 33, 95, 256 };
 
-static int mask_decode(uint32_t mask_idx, const uint8_t *desc, int npos, char *buf) {
+static int mask_decode(uint32_t mask_idx, int pos_offset, int npos, char *buf) {
     uint32_t idx = mask_idx;
+    int n_total = gpu_mask_n_prepend + gpu_mask_n_append;
     for (int i = npos - 1; i >= 0; i--) {
-        int csid = desc[i];
-        int sz = mask_csizes[csid];
+        int pos = pos_offset + i;
+        int sz = gpu_mask_sizes[pos];
         int ci = idx % sz;
         idx /= sz;
-        if (csid == 4) buf[i] = (char)(0x20 + ci);
-        else if (csid == 5) buf[i] = (char)ci;
-        else buf[i] = mask_charsets[csid][ci];
+        buf[i] = (char)gpu_mask_desc[n_total + pos * 256 + ci];
     }
     return npos;
 }
@@ -385,8 +389,11 @@ void gpujob(void *arg) {
                     synthetic_job.found = (unsigned int *)&found;
                     synthetic_job.outlen = 0;
                     int drain_cat = gpu_op_category(pipeline_prev_g->op);
+                    int drain_is_bcrypt = (pipeline_prev_g->op == JOB_BCRYPT);
                     int drain_stored = nhits_drain > GPU_MAX_RETURN ? GPU_MAX_RETURN : nhits_drain;
-                    int drain_stride = (Maxiter > 1 || drain_cat == GPU_CAT_SALTPASS) ? 7 : 6;
+                    int drain_stride = drain_is_bcrypt ? 9
+                        : (Maxiter > 1 || drain_cat == GPU_CAT_SALTPASS) ? 7 : 6;
+                    int drain_hash_words = drain_is_bcrypt ? 6 : 4;
                     int drain_hexlen = 32;
                     for (int h = 0; h < drain_stored; h++) {
                         uint32_t *entry = hits_drain + h * drain_stride;
@@ -394,7 +401,7 @@ void gpujob(void *arg) {
                         if ((unsigned)widx >= (unsigned)pipeline_prev_g->count || sidx < 0 || sidx >= prev_nsalts_packed) continue;
                         int iter_num = (drain_stride >= 7) ? entry[2] : 1;
                         int eoff = (drain_stride >= 7) ? 3 : 2;
-                        for (int w = 0; w < 4; w++) curin.i[w] = entry[eoff + w];
+                        for (int w = 0; w < drain_hash_words; w++) curin.i[w] = entry[eoff + w];
                         char *pass = &pipeline_prev_g->passbuf[pipeline_prev_g->passoff[widx]];
                         int plen = pipeline_prev_g->passlen[widx];
                         memcpy(synthetic_job.line, pass, plen);
@@ -404,11 +411,47 @@ void gpujob(void *arg) {
                         synthetic_job.Ruleindex = pipeline_prev_g->ruleindex[widx];
                         int snap_idx = pack_map[sidx];
                         char *s1 = saltsnap[snap_idx].salt;
-                        if (iter_num <= 1 && drain_cat == GPU_CAT_SALTED) {
+                        int saltlen = saltsnap[snap_idx].saltlen;
+                        if (drain_is_bcrypt) {
+                            unsigned char *raw = (unsigned char *)&curin.i[0];
+                            static const char bf_itoa64[] =
+                                "./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+                            char hashb64[32];
+                            { const unsigned char *sp = raw;
+                              char *dp = hashb64;
+                              int bytes_left = 23;
+                              while (bytes_left > 0) {
+                                unsigned int c1 = *sp++;
+                                *dp++ = bf_itoa64[c1 >> 2];
+                                c1 = (c1 & 0x03) << 4;
+                                if (--bytes_left <= 0) { *dp++ = bf_itoa64[c1]; break; }
+                                unsigned int c2 = *sp++;
+                                c1 |= c2 >> 4;
+                                *dp++ = bf_itoa64[c1];
+                                c1 = (c2 & 0x0f) << 2;
+                                if (--bytes_left <= 0) { *dp++ = bf_itoa64[c1]; break; }
+                                unsigned int c3 = *sp++;
+                                c1 |= c3 >> 6;
+                                *dp++ = bf_itoa64[c1];
+                                *dp++ = bf_itoa64[c3 & 0x3f];
+                                bytes_left--;
+                              }
+                              *dp = 0;
+                            }
+                            char fullhash[128];
+                            memcpy(fullhash, s1, saltlen);
+                            memcpy(fullhash + saltlen, hashb64, 32);
+                            Word_t *HPV;
+                            HPV = (Word_t *)JudySLGet(JudyJ[JOB_BCRYPT], (unsigned char *)fullhash, PJE0);
+                            if (HPV && __sync_bool_compare_and_swap(HPV, 0, 1)) {
+                                PV_DEC(saltsnap[snap_idx].PV);
+                                prfound(&synthetic_job, fullhash);
+                            }
+                        } else if (iter_num <= 1 && drain_cat == GPU_CAT_SALTED) {
                             if (checkhashkey(&curin, drain_hexlen, s1, &synthetic_job))
                                 PV_DEC(saltsnap[snap_idx].PV);
                         } else {
-                            if (checkhashsalt(&curin, drain_hexlen, s1, saltsnap[snap_idx].saltlen, iter_num, &synthetic_job))
+                            if (checkhashsalt(&curin, drain_hexlen, s1, saltlen, iter_num, &synthetic_job))
                                 PV_DEC(saltsnap[snap_idx].PV);
                         }
                     }
@@ -479,8 +522,11 @@ void gpujob(void *arg) {
 #ifndef GPU_DOUBLE_BUFFER
             if (nsalts_packed > 0)
                 gpu_metal_set_salts(salts_packed, soff, slen, nsalts_packed);
-            else
-                Typedone[g->op] = 1;
+            else {
+                int oc = gpu_op_category(g->op);
+                if (oc != GPU_CAT_MASK && oc != GPU_CAT_UNSALTED)
+                    Typedone[g->op] = 1;
+            }
 #endif
         }
         } /* op_cat_rebuild scope */
@@ -489,7 +535,14 @@ void gpujob(void *arg) {
         uint32_t *hits = NULL;
         int op_cat = gpu_op_category(g->op);
 
-        if (g->count == 0 || nsalts_packed == 0) goto return_jobg;
+        if (g->count == 0) goto return_jobg;
+        /* Unsalted types (GPU_CAT_MASK) have no salts — use num_masks instead.
+         * Set nsalts_packed=1 as dummy so dispatch proceeds. */
+        if (nsalts_packed == 0 && (op_cat == GPU_CAT_MASK || op_cat == GPU_CAT_UNSALTED)) {
+            /* No salts needed — set dummy salt count for dispatch */
+        } else if (nsalts_packed == 0) {
+            goto return_jobg;
+        }
 
 #ifdef GPU_DOUBLE_BUFFER
         /* Pipelined dispatch: submit current batch to GPU, then
@@ -643,10 +696,12 @@ void gpujob(void *arg) {
             int is_sha256 = (g->op == JOB_SHA256PASSSALT || g->op == JOB_SHA256SALTPASS);
             int is_phpbb3 = (g->op == JOB_PHPBB3);
             int is_descrypt = (g->op == JOB_DESCRYPT);
+            int is_bcrypt = (g->op == JOB_BCRYPT);
             int hit_stride = is_sha256 ? 11
+                : is_bcrypt ? 9
                 : (is_phpbb3 || is_descrypt) ? 6
                 : (Maxiter > 1 || op_cat == GPU_CAT_SALTPASS) ? 7 : 6;
-            int hash_words = is_sha256 ? 8 : 4;
+            int hash_words = is_sha256 ? 8 : is_bcrypt ? 6 : 4;
             int hexlen = is_sha256 ? 64 : 32;
             int overflow = (nhits > GPU_MAX_RETURN);
 
@@ -657,7 +712,8 @@ void gpujob(void *arg) {
                 int widx = entry[0];
                 int sidx = entry[1];
                 if ((unsigned)widx >= (unsigned)g->count || sidx < 0) continue;
-                if (sidx >= nsalts_packed) continue;
+                if (op_cat != GPU_CAT_MASK && op_cat != GPU_CAT_UNSALTED &&
+                    sidx >= nsalts_packed) continue;
 
 
 
@@ -689,23 +745,23 @@ void gpujob(void *arg) {
                     }
                     uint32_t append_combos = 1;
                     for (int mi = 0; mi < gpu_mask_n_append; mi++)
-                        append_combos *= mask_csizes[gpu_mask_desc[gpu_mask_n_prepend + mi]];
+                        append_combos *= gpu_mask_sizes[gpu_mask_n_prepend + mi];
                     uint32_t prepend_idx = midx / append_combos;
                     uint32_t append_idx = midx % append_combos;
                     char cand[256];
                     int clen = 0;
                     if (gpu_mask_n_prepend > 0)
-                        clen += mask_decode(prepend_idx, gpu_mask_desc, gpu_mask_n_prepend, cand);
+                        clen += mask_decode(prepend_idx, 0, gpu_mask_n_prepend, cand);
                     memcpy(cand + clen, base_word, blen);
                     clen += blen;
                     if (gpu_mask_n_append > 0)
-                        clen += mask_decode(append_idx, gpu_mask_desc + gpu_mask_n_prepend,
+                        clen += mask_decode(append_idx, gpu_mask_n_prepend,
                                             gpu_mask_n_append, cand + clen);
                     cand[clen] = 0;
                     memcpy(synthetic_job.line, cand, clen + 1);
                     synthetic_job.clen = clen;
                     synthetic_job.pass = synthetic_job.line;
-                    checkhash(&curin, hexlen, 1, &synthetic_job);
+                    checkhash(&curin, hexlen, iter_num, &synthetic_job);
                 } else {
                 char *pass = &g->passbuf[g->passoff[widx]];
                 int plen = g->passlen[widx];
@@ -732,6 +788,44 @@ void gpujob(void *arg) {
                     synthetic_job.pass = synthetic_job.line;
                     synthetic_job.clen = cplen;
                     prfound(&synthetic_job, desbuf);
+                } else if (is_bcrypt) {
+                    /* Reconstruct bcrypt hash string from GPU output.
+                     * GPU hit gives 6 LE uint32 words = 24 bytes (23 meaningful).
+                     * On LE host, curin.i[] memory IS the BE byte stream for BF_encode. */
+                    unsigned char *raw = (unsigned char *)&curin.i[0];
+                    static const char bf_itoa64[] =
+                        "./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+                    char hashb64[32];
+                    { const unsigned char *sp = raw;
+                      char *dp = hashb64;
+                      int bytes_left = 23;
+                      while (bytes_left > 0) {
+                        unsigned int c1 = *sp++;
+                        *dp++ = bf_itoa64[c1 >> 2];
+                        c1 = (c1 & 0x03) << 4;
+                        if (--bytes_left <= 0) { *dp++ = bf_itoa64[c1]; break; }
+                        unsigned int c2 = *sp++;
+                        c1 |= c2 >> 4;
+                        *dp++ = bf_itoa64[c1];
+                        c1 = (c2 & 0x0f) << 2;
+                        if (--bytes_left <= 0) { *dp++ = bf_itoa64[c1]; break; }
+                        unsigned int c3 = *sp++;
+                        c1 |= c3 >> 6;
+                        *dp++ = bf_itoa64[c1];
+                        *dp++ = bf_itoa64[c3 & 0x3f];
+                        bytes_left--;
+                      }
+                      *dp = 0;
+                    }
+                    char fullhash[128];
+                    memcpy(fullhash, s1, saltlen);
+                    memcpy(fullhash + saltlen, hashb64, 32);
+                    Word_t *HPV;
+                    HPV = (Word_t *)JudySLGet(JudyJ[JOB_BCRYPT], (unsigned char *)fullhash, PJE0);
+                    if (HPV && __sync_bool_compare_and_swap(HPV, 0, 1)) {
+                        PV_DEC(saltsnap[snap_idx].PV);
+                        prfound(&synthetic_job, fullhash);
+                    }
                 } else if (iter_num <= 1 && op_cat == GPU_CAT_SALTED) {
                     if (checkhashkey(&curin, hexlen, s1, &synthetic_job))
                         PV_DEC(saltsnap[snap_idx].PV);
@@ -843,9 +937,23 @@ void gpujob(void *arg) {
         } /* op_cat scope */
 
 #ifdef GPU_DOUBLE_BUFFER
-        hashcnt += (uint64_t)g->count * nsalts_packed * Maxiter;  /* nsalts_packed is prev's after swap */
+        { int op_cat_h = gpu_op_category(g->op);
+          if (op_cat_h == GPU_CAT_MASK || op_cat_h == GPU_CAT_UNSALTED) {
+            extern uint64_t gpu_mask_total;
+            uint64_t masks = gpu_mask_total > 0 ? gpu_mask_total : 1;
+            hashcnt += (uint64_t)g->count * masks * Maxiter;
+          } else
+            hashcnt += (uint64_t)g->count * nsalts_packed * Maxiter;
+        }
 #else
-        hashcnt += (uint64_t)g->count * nsalts_packed * Maxiter;
+        { int op_cat_h = gpu_op_category(g->op);
+          if (op_cat_h == GPU_CAT_MASK || op_cat_h == GPU_CAT_UNSALTED) {
+            extern uint64_t gpu_mask_total;
+            uint64_t masks = gpu_mask_total > 0 ? gpu_mask_total : 1;
+            hashcnt += (uint64_t)g->count * masks * Maxiter;
+          } else
+            hashcnt += (uint64_t)g->count * nsalts_packed * Maxiter;
+        }
 #endif
 
         /* Flush output */
@@ -1131,6 +1239,7 @@ int gpu_op_category(int op) {
     case JOB_HMAC_RMD160: case JOB_HMAC_RMD160_KPASS:
     case JOB_HMAC_RMD320: case JOB_HMAC_RMD320_KPASS:
     case JOB_HMAC_BLAKE2S:
+    case JOB_BCRYPT:
         return GPU_CAT_SALTPASS;
     case JOB_MD5:
     case JOB_MD4:
@@ -1145,8 +1254,12 @@ int gpu_op_category(int op) {
     case JOB_MD6256:
     case JOB_KECCAK224: case JOB_KECCAK256: case JOB_KECCAK384: case JOB_KECCAK512:
     case JOB_SHA3_224: case JOB_SHA3_256: case JOB_SHA3_384: case JOB_SHA3_512:
-    case JOB_SQL5: case JOB_MYSQL3:
+    case JOB_SQL5: case JOB_SHA1RAW: case JOB_MD5RAW:
+    case JOB_SHA384RAW: case JOB_SHA512RAW:
+    case JOB_MYSQL3:
     case JOB_STREEBOG_32: case JOB_STREEBOG_64:
+    case JOB_RMD160:
+    case JOB_BLAKE2S256:
         return GPU_CAT_MASK;
     case JOB_HMAC_STREEBOG256_KPASS: case JOB_HMAC_STREEBOG256_KSALT:
     case JOB_HMAC_STREEBOG512_KPASS: case JOB_HMAC_STREEBOG512_KSALT:

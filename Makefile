@@ -163,7 +163,9 @@ gpu_metal.o: gpu_metal.m gpu_metal.h gpujob.h job_types.h \
              gpu/metal_md6256unsalted_str.h gpu/metal_wrlunsalted_str.h gpu/metal_keccakunsalted_str.h \
              gpu/metal_mysql3unsalted_str.h gpu/metal_hmac_sha256_str.h gpu/metal_hmac_sha512_str.h \
              gpu/metal_hmac_rmd160_str.h gpu/metal_hmac_rmd320_str.h gpu/metal_hmac_blake2s_str.h \
-             gpu/metal_streebog_str.h gpu/metal_sha256crypt_str.h gpu/metal_sha512crypt_str.h
+             gpu/metal_streebog_str.h gpu/metal_sha256crypt_str.h gpu/metal_sha512crypt_str.h \
+             gpu/metal_rmd160unsalted_str.h gpu/metal_blake2s256unsalted_str.h \
+             gpu/metal_bcrypt_str.h
 	$(CC) -x objective-c++ $(CFLAGS) -std=c++11 -c gpu_metal.m
 
 gpujob_metal.o: gpujob_metal.m gpujob.h job_types.h gpu_metal.h mdxfind.h
@@ -193,7 +195,9 @@ gpu/gpu_opencl.o: gpu/gpu_opencl.c gpu/gpu_opencl.h gpu/gpu_kernels_str.h gpujob
                   gpu/gpu_hmac_sha256_str.h gpu/gpu_hmac_sha512_str.h \
                   gpu/gpu_hmac_rmd160_str.h gpu/gpu_hmac_rmd320_str.h \
                   gpu/gpu_hmac_blake2s_str.h gpu/gpu_streebog_str.h \
-                  gpu/gpu_sha256crypt_str.h gpu/gpu_sha512crypt_str.h
+                  gpu/gpu_sha256crypt_str.h gpu/gpu_sha512crypt_str.h \
+                  gpu/gpu_rmd160unsalted_str.h gpu/gpu_blake2s256unsalted_str.h \
+                  gpu/gpu_bcrypt_str.h
 	$(CC) -DOPENCL_GPU=1 -DCL_TARGET_OPENCL_VERSION=120 -I. -Igpu $(INCEXTRA) -O3 -pthread -c gpu/gpu_opencl.c -o gpu/gpu_opencl.o
 
 gpu/gpujob_opencl.o: gpu/gpujob_opencl.c gpu/gpu_opencl.h gpujob.h job_types.h mdxfind.h

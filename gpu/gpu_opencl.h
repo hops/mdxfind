@@ -43,6 +43,7 @@ int gpu_opencl_set_overflow(int dev_idx,
 
 void gpu_opencl_set_max_iter(int max_iter);
 void gpu_opencl_set_mask_resume(uint32_t start);
+void gpu_opencl_set_salt_resume(uint32_t start);
 void gpu_opencl_set_op(int op);
 int gpu_opencl_max_batch(int dev_idx);
 int gpu_opencl_set_mask(const uint8_t *sizes, const uint8_t tables[][256],
