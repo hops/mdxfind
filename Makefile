@@ -557,7 +557,7 @@ dep-xz:
 	mkdir -p $(DEPDIR); \
 	git clone --depth 1 --branch $(XZ_TAG) $(XZ_REPO) $(DEPDIR)/xz; \
 	cd $(DEPDIR)/xz && \
-	./autogen.sh && \
+	./autogen.sh --no-po4a --no-doxygen && \
 	./configure --enable-static --disable-shared --disable-xz --disable-xzdec \
 		--disable-lzmadec --disable-lzmainfo --disable-scripts --disable-doc && \
 	$(MAKE); \
