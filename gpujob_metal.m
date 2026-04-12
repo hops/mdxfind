@@ -390,11 +390,15 @@ void gpujob(void *arg) {
                     synthetic_job.outlen = 0;
                     int drain_cat = gpu_op_category(pipeline_prev_g->op);
                     int drain_is_bcrypt = (pipeline_prev_g->op == JOB_BCRYPT);
+                    int drain_is_sha256 = (pipeline_prev_g->op == JOB_SHA256PASSSALT ||
+                                           pipeline_prev_g->op == JOB_SHA256SALTPASS ||
+                                           pipeline_prev_g->op == JOB_SHA256CRYPT);
                     int drain_stored = nhits_drain > GPU_MAX_RETURN ? GPU_MAX_RETURN : nhits_drain;
-                    int drain_stride = drain_is_bcrypt ? 9
+                    int drain_stride = drain_is_sha256 ? 11
+                        : drain_is_bcrypt ? 9
                         : (Maxiter > 1 || drain_cat == GPU_CAT_SALTPASS) ? 7 : 6;
-                    int drain_hash_words = drain_is_bcrypt ? 6 : 4;
-                    int drain_hexlen = 32;
+                    int drain_hash_words = drain_is_sha256 ? 8 : drain_is_bcrypt ? 6 : 4;
+                    int drain_hexlen = drain_is_sha256 ? 64 : 32;
                     for (int h = 0; h < drain_stored; h++) {
                         uint32_t *entry = hits_drain + h * drain_stride;
                         int widx = entry[0], sidx = entry[1];
@@ -693,7 +697,8 @@ void gpujob(void *arg) {
         if (hits && nhits > 0) {
             salt_refresh = 1;
             int stored = nhits > GPU_MAX_RETURN ? GPU_MAX_RETURN : nhits;
-            int is_sha256 = (g->op == JOB_SHA256PASSSALT || g->op == JOB_SHA256SALTPASS);
+            int is_sha256 = (g->op == JOB_SHA256PASSSALT || g->op == JOB_SHA256SALTPASS ||
+                            g->op == JOB_SHA256CRYPT);
             int is_phpbb3 = (g->op == JOB_PHPBB3);
             int is_descrypt = (g->op == JOB_DESCRYPT);
             int is_bcrypt = (g->op == JOB_BCRYPT);
@@ -1240,6 +1245,7 @@ int gpu_op_category(int op) {
     case JOB_HMAC_RMD320: case JOB_HMAC_RMD320_KPASS:
     case JOB_HMAC_BLAKE2S:
     case JOB_BCRYPT:
+    case JOB_SHA512CRYPT: case JOB_SHA256CRYPT:
         return GPU_CAT_SALTPASS;
     case JOB_MD5:
     case JOB_MD4:
@@ -1263,7 +1269,6 @@ int gpu_op_category(int op) {
         return GPU_CAT_MASK;
     case JOB_HMAC_STREEBOG256_KPASS: case JOB_HMAC_STREEBOG256_KSALT:
     case JOB_HMAC_STREEBOG512_KPASS: case JOB_HMAC_STREEBOG512_KSALT:
-    case JOB_SHA512CRYPT: case JOB_SHA256CRYPT:
     default:
         return GPU_CAT_NONE;
     }

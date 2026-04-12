@@ -1181,6 +1181,7 @@ int gpu_op_category(int op) {
     case JOB_HMAC_RMD320: case JOB_HMAC_RMD320_KPASS:
     case JOB_HMAC_BLAKE2S:
     case JOB_BCRYPT:
+    case JOB_SHA512CRYPT: case JOB_SHA256CRYPT:
         return GPU_CAT_SALTPASS;
     case JOB_MD5_MD5SALTMD5PASS:
         return GPU_CAT_SALTED;
@@ -1208,7 +1209,6 @@ int gpu_op_category(int op) {
         return GPU_CAT_MASK;
     case JOB_HMAC_STREEBOG256_KPASS: case JOB_HMAC_STREEBOG256_KSALT:
     case JOB_HMAC_STREEBOG512_KPASS: case JOB_HMAC_STREEBOG512_KSALT:
-    case JOB_SHA512CRYPT: case JOB_SHA256CRYPT:
     default:
         return GPU_CAT_NONE;
     }

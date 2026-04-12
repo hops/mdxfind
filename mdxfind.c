@@ -34836,6 +34836,99 @@ void build_compact_table(void) {
     if (bc_added)
       fprintf(stderr, "Compact table: added %d bcrypt hashes for GPU probing\n", bc_added);
   }
+  /* Decode SHA512CRYPT ($6$) hashes from JudyJ and insert into compact table
+   * for GPU probing.  Only the first 16 bytes of the 64-byte raw hash are
+   * stored (enough for compact_fp/idx key + probe_compact's 4-word compare). */
+  { static const unsigned char sha512_perm[21][3] = {
+        {0,21,42},{22,43,1},{44,2,23},{3,24,45},{25,46,4},
+        {5,26,47},{27,48,6},{7,28,49},{29,50,8},{9,30,51},
+        {31,52,10},{11,32,53},{33,54,12},{13,34,55},{35,56,14},
+        {15,36,57},{37,58,16},{17,38,59},{39,60,18},{19,40,61},
+        {41,62,20}
+    };
+    char sc_line[256];
+    Word_t *SC_PV;
+    int sc_added = 0;
+    init_phpatoi64();
+    sc_line[0] = 0;
+    JSLF(SC_PV, JudyJ[JOB_SHA512CRYPT], (unsigned char *)sc_line);
+    /* Ensure HashDataBuf is allocated (may be NULL if no hex hashes were loaded) */
+    if (SC_PV && !HashDataBuf) {
+      HashDataBufCap = 65536;
+      HashDataBuf = malloc(HashDataBufCap);
+      HashDataOff = malloc(65536 * sizeof(size_t));
+      HashDataLen = malloc(65536 * sizeof(unsigned short));
+      HashDataFlags = malloc(65536 * sizeof(unsigned short));
+      if (HashDataFlags) memset(HashDataFlags, 0, 65536 * sizeof(unsigned short));
+      HashDataCap = 65536;
+    } else if (SC_PV && HashDataCap == 0) {
+      /* Arrays exist (e.g. from bcrypt block) but HashDataCap not tracked */
+      HashDataCap = 65536;
+    }
+    while (SC_PV) {
+      /* Find hash portion: $6$[rounds=N$]salt$HASH (86 chars) */
+      char *hp = sc_line + 3; /* skip "$6$" */
+      if (strncmp(hp, "rounds=", 7) == 0) {
+        hp = strchr(hp, '$');
+        if (hp) hp++;
+      }
+      if (hp) hp = strchr(hp, '$');
+      if (hp) hp++; /* hp now points to 86-char hash */
+      if (hp && strlen(hp) >= 86) {
+        unsigned char raw[64];
+        int decode_ok = 1;
+        /* Decode 21 groups of 4 base64 chars -> 3 bytes each */
+        for (int g = 0; g < 21 && decode_ok; g++) {
+          int c0 = phpatoi64[(unsigned char)hp[g*4]];
+          int c1 = phpatoi64[(unsigned char)hp[g*4+1]];
+          int c2 = phpatoi64[(unsigned char)hp[g*4+2]];
+          int c3 = phpatoi64[(unsigned char)hp[g*4+3]];
+          if (c0 < 0 || c1 < 0 || c2 < 0 || c3 < 0) { decode_ok = 0; break; }
+          unsigned int v = c0 | (c1 << 6) | (c2 << 12) | (c3 << 18);
+          raw[sha512_perm[g][0]] = (v >> 16) & 0xff;
+          raw[sha512_perm[g][1]] = (v >> 8) & 0xff;
+          raw[sha512_perm[g][2]] = v & 0xff;
+        }
+        if (decode_ok) {
+          /* Final byte[63]: 2 base64 chars */
+          int c0 = phpatoi64[(unsigned char)hp[84]];
+          int c1 = phpatoi64[(unsigned char)hp[85]];
+          if (c0 >= 0 && c1 >= 0) {
+            raw[63] = (c0 | (c1 << 6)) & 0xff;
+          } else {
+            decode_ok = 0;
+          }
+        }
+        if (decode_ok) {
+          /* Grow arrays if needed */
+          if (HashDataCount + 1 > HashDataCap) {
+            size_t newcap = HashDataCap ? HashDataCap * 2 : 4096;
+            HashDataOff = realloc(HashDataOff, newcap * sizeof(size_t));
+            HashDataLen = realloc(HashDataLen, newcap * sizeof(unsigned short));
+            HashDataFlags = realloc(HashDataFlags, newcap * sizeof(unsigned short));
+            memset(HashDataFlags + HashDataCap, 0, (newcap - HashDataCap) * sizeof(unsigned short));
+            HashDataCap = newcap;
+          }
+          if (HashDataBufUsed + 16 > HashDataBufCap) {
+            size_t newcap = HashDataBufCap ? HashDataBufCap * 2 : 65536;
+            HashDataBuf = realloc(HashDataBuf, newcap);
+            HashDataBufCap = newcap;
+          }
+          HashDataOff[HashDataCount] = HashDataBufUsed;
+          HashDataLen[HashDataCount] = 16;
+          HashDataFlags[HashDataCount] = 0;
+          memcpy(HashDataBuf + HashDataBufUsed, raw, 16);
+          HashDataBufUsed += 16;
+          compact_insert();
+          HashDataCount++;
+          sc_added++;
+        }
+      }
+      JSLN(SC_PV, JudyJ[JOB_SHA512CRYPT], (unsigned char *)sc_line);
+    }
+    if (sc_added)
+      fprintf(stderr, "Compact table: added %d SHA512CRYPT hashes for GPU probing\n", sc_added);
+  }
 #ifdef GPU_ENABLED
   /* Only initialize GPU if at least one GPU-capable hash type is selected */
   { int need_gpu = 0;
