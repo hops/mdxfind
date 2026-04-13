@@ -512,8 +512,9 @@ void gpujob(void *arg) {
                     if ((uint32_t)sidx > max_salt_idx) max_salt_idx = (uint32_t)sidx;
                     char *base_word;
                     int blen;
-                    if (g->word_stride && widx < 4096) {
-                        /* Unsalted pre-padded: extract base word from M[] block */
+                    if (g->word_stride && widx < 4096 &&
+                        (gpu_mask_n_prepend > 0 || gpu_mask_n_append > 0)) {
+                        /* Unsalted pre-padded with mask: extract base word from M[] block */
                         char *slot = g->raw + widx * g->word_stride;
                         int total_len = ((uint32_t *)slot)[14] >> 3; /* bit-length / 8 */
                         blen = total_len - gpu_mask_n_prepend - gpu_mask_n_append;
@@ -1181,13 +1182,13 @@ int gpu_op_category(int op) {
     case JOB_HMAC_RMD320: case JOB_HMAC_RMD320_KPASS:
     case JOB_HMAC_BLAKE2S:
     case JOB_BCRYPT:
-    case JOB_SHA512CRYPT: case JOB_SHA256CRYPT:
+    case JOB_SHA512CRYPT: case JOB_SHA256CRYPT: case JOB_SHA512CRYPTMD5:
         return GPU_CAT_SALTPASS;
     case JOB_MD5_MD5SALTMD5PASS:
         return GPU_CAT_SALTED;
     case JOB_SHA1DRU:
         return GPU_CAT_ITER;
-    case JOB_MD5:
+    case JOB_MD5: case JOB_MD5UC:
     case JOB_MD4:
     case JOB_NTLMH:
     case JOB_SHA1:
@@ -1209,6 +1210,7 @@ int gpu_op_category(int op) {
         return GPU_CAT_MASK;
     case JOB_HMAC_STREEBOG256_KPASS: case JOB_HMAC_STREEBOG256_KSALT:
     case JOB_HMAC_STREEBOG512_KPASS: case JOB_HMAC_STREEBOG512_KSALT:
+        return GPU_CAT_SALTPASS;
     default:
         return GPU_CAT_NONE;
     }

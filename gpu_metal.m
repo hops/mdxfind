@@ -44,6 +44,8 @@
 #include "gpu/metal_rmd160unsalted_str.h"
 #include "gpu/metal_blake2s256unsalted_str.h"
 #include "gpu/metal_bcrypt_str.h"
+#include "gpu/metal_sha1_str.h"
+#include "gpu/metal_md5crypt_str.h"
 
 /* Family IDs from gpujob.h FAM_* enum — Metal uses a subset */
 static const char *mtl_family_source[FAM_COUNT] = {
@@ -72,6 +74,8 @@ static const char *mtl_family_source[FAM_COUNT] = {
     [FAM_RMD160UNSALTED]    = metal_rmd160unsalted_str,
     [FAM_BLAKE2S256UNSALTED] = metal_blake2s256unsalted_str,
     [FAM_BCRYPT]             = metal_bcrypt_str,
+    [FAM_MD5CRYPT]           = metal_md5crypt_str,
+    [FAM_SHA1]               = metal_sha1_str,
 };
 
 /* ---- Metal state ---- */
@@ -123,6 +127,9 @@ static const struct {
     {"hmac_sha224_kpass_batch",  {JOB_HMAC_SHA224_KPASS, -1}, FAM_SHA256},
     {"hmac_md5_ksalt_batch",    {JOB_HMAC_MD5, -1}, FAM_MD5SALT},
     {"hmac_md5_kpass_batch",    {JOB_HMAC_MD5_KPASS, -1}, FAM_MD5SALT},
+    {"sha1passsalt_batch",      {JOB_SHA1PASSSALT, -1}, FAM_SHA1},
+    {"sha1saltpass_batch",      {JOB_SHA1SALTPASS, -1}, FAM_SHA1},
+    {"sha1dru_batch",           {JOB_SHA1DRU, -1}, FAM_SHA1},
     {"hmac_sha1_ksalt_batch",   {JOB_HMAC_SHA1, -1}, FAM_SHA1},
     {"hmac_sha1_kpass_batch",   {JOB_HMAC_SHA1_KPASS, -1}, FAM_SHA1},
     {"sha512passsalt_batch",    {JOB_SHA512PASSSALT, -1}, FAM_HMAC_SHA512},
@@ -131,7 +138,12 @@ static const struct {
     {"hmac_sha512_kpass_batch", {JOB_HMAC_SHA512_KPASS, -1}, FAM_HMAC_SHA512},
     {"hmac_sha384_ksalt_batch", {JOB_HMAC_SHA384, -1}, FAM_HMAC_SHA512},
     {"hmac_sha384_kpass_batch", {JOB_HMAC_SHA384_KPASS, -1}, FAM_HMAC_SHA512},
+    {"md5_unsalted_batch",     {JOB_MD5RAW, JOB_MD5UC, -1}, FAM_MD5UNSALTED},
+    {"sha1_unsalted_batch",    {JOB_SHA1RAW, -1}, FAM_SHA1UNSALTED},
     {"sql5_unsalted_batch",    {JOB_SQL5, -1}, FAM_SHA1UNSALTED},
+    {"sha256_unsalted_batch",  {JOB_SHA256RAW, -1}, FAM_SHA256UNSALTED},
+    {"sha384_unsalted_batch",  {JOB_SHA384RAW, -1}, FAM_SHA512UNSALTED},
+    {"sha512_unsalted_batch",  {JOB_SHA512RAW, -1}, FAM_SHA512UNSALTED},
     {"mysql3_unsalted_batch",  {JOB_MYSQL3, -1}, FAM_MYSQL3UNSALTED},
     {"hmac_rmd160_ksalt_batch", {JOB_HMAC_RMD160, -1}, FAM_HMAC_RMD160},
     {"hmac_rmd160_kpass_batch", {JOB_HMAC_RMD160_KPASS, -1}, FAM_HMAC_RMD160},
@@ -144,11 +156,12 @@ static const struct {
     {"hmac_streebog256_ksalt_batch",   {JOB_HMAC_STREEBOG256_KSALT, -1}, FAM_STREEBOG},
     {"hmac_streebog512_kpass_batch",   {JOB_HMAC_STREEBOG512_KPASS, -1}, FAM_STREEBOG},
     {"hmac_streebog512_ksalt_batch",   {JOB_HMAC_STREEBOG512_KSALT, -1}, FAM_STREEBOG},
-    {"sha512crypt_batch",              {JOB_SHA512CRYPT, -1}, FAM_SHA512CRYPT},
+    {"sha512crypt_batch",              {JOB_SHA512CRYPT, JOB_SHA512CRYPTMD5, -1}, FAM_SHA512CRYPT},
     {"sha256crypt_batch",              {JOB_SHA256CRYPT, -1}, FAM_SHA256CRYPT},
     {"rmd160_unsalted_batch",          {JOB_RMD160, -1}, FAM_RMD160UNSALTED},
     {"blake2s256_unsalted_batch",      {JOB_BLAKE2S256, -1}, FAM_BLAKE2S256UNSALTED},
     {"bcrypt_batch",                   {JOB_BCRYPT, -1}, FAM_BCRYPT},
+    {"md5crypt_batch",                 {JOB_MD5CRYPT, -1}, FAM_MD5CRYPT},
     {NULL, {-1}, 0}
 };
 #define MTL_KERN_ITER_IDX 2
@@ -775,6 +788,9 @@ uint32_t *gpu_metal_dispatch_batch(
         NSUInteger tpg = [pipeline maxTotalThreadsPerThreadgroup];
         if (tpg > 256) tpg = 256;
         if (_gpu_op == JOB_BCRYPT && tpg > 8) tpg = 8;
+        if (_gpu_op == JOB_SHA512CRYPT || _gpu_op == JOB_SHA512CRYPTMD5) {
+            if (tpg > 32) tpg = 32;  /* SHA512CRYPT uses heavy stack; limit occupancy */
+        }
         MTLSize groupSize = MTLSizeMake(tpg, 1, 1);
 
         /* Salt chunking: encode chunks into command buffer using setBytes for params */

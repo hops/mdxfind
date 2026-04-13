@@ -183,9 +183,23 @@ int Neon;
 #define mysha1 SHA1
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.296 2026/04/11 15:02:41 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.300 2026/04/12 23:03:49 dlr Exp dlr $";
 /*
  * $Log: mdxfind.c,v $
+ * Revision 1.300  2026/04/12 23:03:49  dlr
+ * Add -G force for GPU regression testing, fix stride detection for non-standard types
+ *
+ * Revision 1.299  2026/04/12 14:54:50  dlr
+ * Wire HMAC-Streebog dispatch, add MD5CRYPT/SHA1 to Metal compile switch
+ *
+ * Revision 1.298  2026/04/12 14:39:27  dlr
+ * Wire GPU dispatch for all HMAC types and HMAC_BLAKE2S, saltsnap allocation for Typeuser,
+ * [GPU] tag additions
+ *
+ * Revision 1.297  2026/04/12 14:24:39  dlr
+ * Wire GPU dispatch for SHA512SALTPASS/PASSSALT, add RMD160/BLAKE2S256 to compile switches,
+ * remove RAW types from Metal gpu_op_category (no Metal kernels), add BCRYPT/RMD160/BLAKE2S to [GPU] tag
+ *
  * Revision 1.296  2026/04/11 15:02:41  dlr
  * GPU -i/-n/-N: iteration-only dispatch (no mask), Metal mask upload infrastructure,
  * hcdefaults SaltArray guard fix, Metal mask upload block
@@ -1751,6 +1765,7 @@ int NoMarkSalt, Hexkey, Rotatehash, Unicode, Dedupe, XMLchar, Email, Printall;
 #ifdef GPU_ENABLED
 int NoMetal;
 int gpu_device_filter_set = 0;     /* 1 if -G specified device list */
+int GPUForce = 0;                  /* 1 = -G force: bypass minimum work thresholds */
 int gpu_device_allowed[64];        /* per-device allow flags */
 #endif
 
@@ -5935,7 +5950,7 @@ static unsigned short TypeOpts[JOB_DONE] = {
     [535] = TYPEOPT_NEEDSJ | TYPEOPT_NEEDSALT | TYPEOPT_SALTJUDY,  /* SHA1-CUSTOMUSERSALT */
     [536] = TYPEOPT_NEEDSF,  /* PROGRESSENCODE */
     [537] = TYPEOPT_NEEDSF | TYPEOPT_NEEDSJ | TYPEOPT_NEEDSALT | TYPEOPT_SALTJUDY,  /* PHPBB3MD5 */
-    [538] = TYPEOPT_NEEDSF | TYPEOPT_NEEDSALT | TYPEOPT_SALTJUDY,  /* SHA512CRYPTMD5 */
+    [538] = TYPEOPT_NEEDSJ | TYPEOPT_NEEDSALT | TYPEOPT_SALTJUDY,  /* SHA512CRYPTMD5 */
     [539] = TYPEOPT_NEEDSF,  /* MYSQL5MD5 */
     [540] = TYPEOPT_NEEDSF | TYPEOPT_NEEDUSER,  /* MANGOS */
     [541] = TYPEOPT_NEEDSF | TYPEOPT_NEEDSALT | TYPEOPT_SALTJUDY,  /* MD5revMD5SALT */
@@ -8424,7 +8439,8 @@ static inline void lm_des_key(const unsigned char *raw7, DES_key_schedule *ks)
 int gpu_try_pack_unsalted(struct jobg **pjobg, struct job *job, int appendlen, int prependlen, char *pass, int len)
 {
     struct jobg *g = *pjobg;
-    int is_sha512 = (job->op == JOB_SHA512 || job->op == JOB_SHA384);
+    int is_sha512 = (job->op == JOB_SHA512 || job->op == JOB_SHA384 ||
+                     job->op == JOB_SHA512RAW || job->op == JOB_SHA384RAW);
     int is_utf16 = (job->op == JOB_NTLMH);
     int is_md6 = (job->op == JOB_MD6256);
     int keccak_rate = 0;  /* 0 = not keccak/sha3 */
@@ -8618,8 +8634,10 @@ static int gpu_try_pack(struct jobg **pjobg, struct job *job,
     if (Maxiter > 1 && (cat == GPU_CAT_MASK || cat == GPU_CAT_UNSALTED ||
                         cat == GPU_CAT_SALTPASS || cat == GPU_CAT_SALTED)) {
         switch (job->op) {
-        case JOB_MD5: case JOB_SHA1: case JOB_SHA256:  /* have GPU iter */
+        case JOB_MD5: case JOB_SHA1: case JOB_SHA256:  /* have GPU hex iter */
         case JOB_MD4: case JOB_MD4UTF16: case JOB_SHA512:
+        case JOB_MD5RAW: case JOB_SHA1RAW: case JOB_SHA256RAW:  /* GPU binary iter */
+        case JOB_SHA384RAW: case JOB_SHA512RAW:
             break;
         default: return 0;
         }
@@ -8629,7 +8647,7 @@ static int gpu_try_pack(struct jobg **pjobg, struct job *job,
      * Exception: iteration-only (-i > 1, no -n) dispatches with num_masks=1. */
     if (cat == GPU_CAT_MASK) {
         extern uint64_t gpu_mask_total;
-        if (gpu_mask_total == 0 && Maxiter <= 1) return 0;
+        if (gpu_mask_total == 0 && Maxiter <= 1 && !GPUForce) return 0;
         if (job->clen <= 0 || !job->pass) return 0;
     }
 
@@ -8837,6 +8855,16 @@ saltpool = NULL;
     if (sti < JOB_DONE) {
       if (Typesaltcnt[sti] > maxcnt) maxcnt = Typesaltcnt[sti];
       if (Typesaltbytes[sti] > maxbytes) maxbytes = Typesaltbytes[sti];
+      /* HMAC key=$salt types use Typeuser — count those too */
+      if (Typeuser && Typeuser[sti]) {
+        Word_t cnt = 0, bytes = 0;
+        unsigned char tbuf[MAXLINE];
+        tbuf[0] = 0;
+        JSLF(PV, Typeuser[sti], tbuf);
+        while (PV) { cnt++; bytes += mystrlen((char *)tbuf) + 1; JSLN(PV, Typeuser[sti], tbuf); }
+        if (cnt > (Word_t)maxcnt) maxcnt = (int)cnt;
+        if (bytes > (Word_t)maxbytes) maxbytes = (int)bytes;
+      }
     }
     J1N(RC, Dohash, sti);
   }
@@ -9069,9 +9097,9 @@ while (1) {
    * to ensure GPU gets full batches. */
   unsigned char *gpu_done = NULL;
   if (gpujob_available() && gpu_op_category(job->op) == GPU_CAT_MASK &&
-      ((MaskAppendLen > 0 || MaskPrependLen > 0) || Maxiter > 1) && !Rules && !Email) {
+      ((MaskAppendLen > 0 || MaskPrependLen > 0) || Maxiter > 1 || GPUForce) && !Rules && !Email) {
     extern uint64_t gpu_mask_total;
-    if (gpu_mask_total > 0 || Maxiter > 1) {
+    if (gpu_mask_total > 0 || Maxiter > 1 || GPUForce) {
       static __thread unsigned char *gpu_done_buf = NULL;
       static __thread int gpu_done_size = 0;
       int nbytes = (job->numline + 7) / 8;
@@ -10264,10 +10292,23 @@ do {
 	}
 	if (!nsalts_job) { Typedone[job->op] = 1; break; }
 #ifdef GPU_ENABLED
-	if ((job->op == JOB_SHA512CRYPT || job->op == JOB_SHA256CRYPT) &&
-	    gpu_try_pack(&my_jobg, job, NULL, nsalts_job, 0)) {
-	  /* hashcnt accounted by gpujob thread */
-	  break;
+	if ((job->op == JOB_SHA512CRYPT || job->op == JOB_SHA256CRYPT ||
+	     job->op == JOB_SHA512CRYPTMD5) &&
+	    1) {
+	  /* SHA512CRYPTMD5: override password with pre-computed MD5 hex (cur/len) */
+	  char *save_pass = NULL; int save_clen = 0;
+	  if (job->op == JOB_SHA512CRYPTMD5) {
+	    save_pass = job->pass; save_clen = job->clen;
+	    job->pass = cur; job->clen = len; /* cur = 32-char MD5 hex */
+	  }
+	  int packed = gpu_try_pack(&my_jobg, job, NULL, nsalts_job, 0);
+	  if (job->op == JOB_SHA512CRYPTMD5) {
+	    job->pass = save_pass; job->clen = save_clen;
+	  }
+	  if (packed) {
+	    /* hashcnt accounted by gpujob thread */
+	    break;
+	  }
 	}
 #endif
 	{ int si;
@@ -12151,6 +12192,10 @@ sha512salt_s:
                   if (!nsalts_job) { Typedone[job->op] = 1; break; }
                 }
                 if (!nsalts_job) { Typedone[job->op] = 1; break; }
+#ifdef GPU_ENABLED
+                if (nsalts_job > 0 && gpu_try_pack(&my_jobg, job, NULL, nsalts_job, 0))
+                  break;
+#endif
                 { int si;
                 for (si = 0; si < nsalts_job; si++) {
                   saltlen = saltsnap[si].saltlen;
@@ -12206,6 +12251,10 @@ sha512salt_s:
                   if (!nsalts_job) { Typedone[job->op] = 1; break; }
                 }
                 if (!nsalts_job) { Typedone[job->op] = 1; break; }
+#ifdef GPU_ENABLED
+                if (nsalts_job > 0 && gpu_try_pack(&my_jobg, job, NULL, nsalts_job, 0))
+                  break;
+#endif
                 { int si;
                 for (si = 0; si < nsalts_job; si++) {
                   saltlen = saltsnap[si].saltlen;
@@ -27715,6 +27764,16 @@ HAV256_5_start:
                 { Pvoid_t ujudy = (Pvoid_t)Typeuser[job->op];
                   if (!ujudy) ujudy = (Pvoid_t)UseridJudy;
                   if (!ujudy) break;
+#ifdef GPU_ENABLED
+                  if (saltsnap && !snap_valid) {
+                    nsalts_job = build_salt_snapshot(saltsnap, saltpool,
+                                    ujudy, tsalt, Printall);
+                    snap_valid = 1;
+                  }
+                  if (saltsnap && nsalts_job > 0 &&
+                      gpu_try_pack(&my_jobg, job, NULL, nsalts_job, 0))
+                    break;
+#endif
                   tsalt[0] = 0;
                   JSLF(PV, ujudy, (unsigned char *)tsalt);
                   while (PV) {
@@ -27815,6 +27874,10 @@ HAV256_5_start:
                   if (!nsalts_job) { Typedone[job->op] = 1; break; }
                 }
                 if (!nsalts_job) { Typedone[job->op] = 1; break; }
+#ifdef GPU_ENABLED
+                if (nsalts_job > 0 && gpu_try_pack(&my_jobg, job, NULL, nsalts_job, 0))
+                  break;
+#endif
                 { int si;
                 for (si = 0; si < nsalts_job; si++) {
                   MHASH td;
@@ -28501,6 +28564,10 @@ HAV256_5_start:
 		  if (!nsalts_job) { Typedone[job->op] = 1; break; }
 		}
 		if (!nsalts_job) { Typedone[job->op] = 1; break; }
+#ifdef GPU_ENABLED
+		if (nsalts_job > 0 && gpu_try_pack(&my_jobg, job, NULL, nsalts_job, 0))
+		  break;
+#endif
 		{ int si;
 		for (si = 0; si < nsalts_job; si++) {
 		  saltlen = saltsnap[si].saltlen;
@@ -28892,6 +28959,10 @@ HAV256_5_start:
 		  if (!nsalts_job) { Typedone[job->op] = 1; break; }
 		}
 		if (!nsalts_job) { Typedone[job->op] = 1; break; }
+#ifdef GPU_ENABLED
+		if (nsalts_job > 0 && gpu_try_pack(&my_jobg, job, NULL, nsalts_job, 0))
+		  break;
+#endif
 		{ int si;
 		for (si = 0; si < nsalts_job; si++) {
 		  saltlen = saltsnap[si].saltlen;
@@ -28946,6 +29017,10 @@ HAV256_5_start:
 		  if (!nsalts_job) { Typedone[job->op] = 1; break; }
 		}
 		if (!nsalts_job) { Typedone[job->op] = 1; break; }
+#ifdef GPU_ENABLED
+		if (nsalts_job > 0 && gpu_try_pack(&my_jobg, job, NULL, nsalts_job, 0))
+		  break;
+#endif
 		{ int si;
 		for (si = 0; si < nsalts_job; si++) {
 		  saltlen = saltsnap[si].saltlen;
@@ -29000,6 +29075,10 @@ HAV256_5_start:
 		  if (!nsalts_job) { Typedone[job->op] = 1; break; }
 		}
 		if (!nsalts_job) { Typedone[job->op] = 1; break; }
+#ifdef GPU_ENABLED
+		if (nsalts_job > 0 && gpu_try_pack(&my_jobg, job, NULL, nsalts_job, 0))
+		  break;
+#endif
 		{ int si;
 		for (si = 0; si < nsalts_job; si++) {
 		  saltlen = saltsnap[si].saltlen;
@@ -29053,6 +29132,10 @@ HAV256_5_start:
 		  if (!nsalts_job) { Typedone[job->op] = 1; break; }
 		}
 		if (!nsalts_job) { Typedone[job->op] = 1; break; }
+#ifdef GPU_ENABLED
+		if (nsalts_job > 0 && gpu_try_pack(&my_jobg, job, NULL, nsalts_job, 0))
+		  break;
+#endif
 		{ int si;
 		for (si = 0; si < nsalts_job; si++) {
 		  saltlen = saltsnap[si].saltlen;
@@ -34935,6 +35018,8 @@ void build_compact_table(void) {
     }
     if (sc_added)
       fprintf(stderr, "Compact table: added %d SHA512CRYPT hashes for GPU probing\n", sc_added);
+    /* SHA512CRYPTMD5 shares the same $6$ hashes in JudyJ[JOB_SHA512CRYPT],
+     * so the compact table entries above already cover both types. */
   }
 #ifdef GPU_ENABLED
   /* Only initialize GPU if at least one GPU-capable hash type is selected */
@@ -34962,7 +35047,7 @@ void build_compact_table(void) {
                       JOB_HMAC_STREEBOG256_KPASS, JOB_HMAC_STREEBOG256_KSALT,
                       JOB_HMAC_STREEBOG512_KPASS, JOB_HMAC_STREEBOG512_KSALT,
                       JOB_SHA512PASSSALT, JOB_SHA512SALTPASS,
-                      JOB_SHA512CRYPT, JOB_SHA256CRYPT,
+                      JOB_SHA512CRYPT, JOB_SHA256CRYPT, JOB_SHA512CRYPTMD5,
                       JOB_MD5RAW, JOB_SHA1RAW, JOB_SHA384RAW, JOB_SHA512RAW,
                       JOB_SQL5, JOB_MYSQL3, JOB_DESCRYPT,
                       JOB_RMD160, JOB_BLAKE2S256, JOB_BCRYPT, -1 };
@@ -37751,7 +37836,7 @@ static void load_hash_file(gzFile gi, const char *filename, Pvoid_t *pDoload) {
       }
     }
     /* $5$ sha256crypt, $6$ sha512crypt, $8$ cisco8, $9$ cisco9 */
-    if ((lf[JOB_SHA256CRYPT] || lf[JOB_SHA512CRYPT] || lf[JOB_CISCO8] || lf[JOB_CISCO9]) &&
+    if ((lf[JOB_SHA256CRYPT] || lf[JOB_SHA512CRYPT] || lf[JOB_SHA512CRYPTMD5] || lf[JOB_CISCO8] || lf[JOB_CISCO9]) &&
         line[0] == '$' && (line[1] == '5' || line[1] == '6' || line[1] == '8' || line[1] == '9') && line[2] == '$') {
       for (x = 3; x < 254; x++) {
         if (line[x] == ':' || (signed char)line[x] <= ' ' || (signed char)line[x] > 'z') break;
@@ -39882,7 +39967,11 @@ int main(int argc, char **argv) {
                   x == JOB_SHA512CRYPT || x == JOB_SHA256CRYPT ||
                   x == JOB_MD5RAW || x == JOB_SHA1RAW ||
                   x == JOB_SHA384RAW || x == JOB_SHA512RAW ||
-                  x == JOB_SQL5 || x == JOB_MYSQL3)
+                  x == JOB_SQL5 || x == JOB_MYSQL3 ||
+                  x == JOB_BCRYPT || x == JOB_RMD160 ||
+                  x == JOB_BLAKE2S256 ||
+                  x == JOB_SHA512CRYPTMD5 ||
+                  x == JOB_MD4UTF16)
                 gpu = " [GPU]";
 #endif
               if (hci)
@@ -40066,6 +40155,10 @@ int main(int argc, char **argv) {
           /* TODO: metal list */
 #endif
           exit(0);
+        } else if (optarg[0] == 'f' || optarg[0] == 'F') {
+          extern int GPUForce;
+          GPUForce = 1;
+          fprintf(stderr, "GPU force: all eligible words dispatched to GPU\n");
         } else if (optarg[0] == 'n' || optarg[0] == 'N') {
           fprintf(stderr, "GPU disabled\n");
           NoMetal = 1;
@@ -44107,13 +44200,18 @@ usage:
 	  case JOB_HMAC_STREEBOG512_KPASS: case JOB_HMAC_STREEBOG512_KSALT:
 	    fam = 1u << FAM_STREEBOG; break;
 	  case JOB_PHPBB3: fam = 1u << FAM_PHPBB3; break;
+	  case JOB_MD5CRYPT: fam = 1u << FAM_MD5CRYPT; break;
 	  case JOB_MD5_MD5SALTMD5PASS: fam = 1u << FAM_MD5_MD5SALTMD5PASS; break;
+	  case JOB_SHA1PASSSALT: case JOB_SHA1SALTPASS: case JOB_SHA1DRU: fam = 1u << FAM_SHA1; break;
 	  case JOB_SHA256PASSSALT: case JOB_SHA256SALTPASS: fam = 1u << FAM_SHA256; break;
 	  case JOB_SHA512PASSSALT: case JOB_SHA512SALTPASS: fam = 1u << FAM_HMAC_SHA512; break;
-	  case JOB_SHA512CRYPT: fam = 1u << FAM_SHA512CRYPT; break;
+	  case JOB_SHA512CRYPT: case JOB_SHA512CRYPTMD5:
+	    fam = 1u << FAM_SHA512CRYPT; break;
 	  case JOB_SHA256CRYPT: fam = 1u << FAM_SHA256CRYPT; break;
 	  case JOB_DESCRYPT: fam = 1u << FAM_DESCRYPT; break;
 	  case JOB_BCRYPT: fam = 1u << FAM_BCRYPT; break;
+	  case JOB_RMD160: fam = 1u << FAM_RMD160UNSALTED; break;
+	  case JOB_BLAKE2S256: fam = 1u << FAM_BLAKE2S256UNSALTED; break;
 	}
 	if (fam & FAM_MD5SALT) {
 	  linehints[lsi].lineswanted = UINT_MAX;
@@ -44185,10 +44283,13 @@ usage:
             case JOB_SHA1PASSSALT: case JOB_SHA1SALTPASS: case JOB_SHA1DRU: fam |= 1u << FAM_SHA1; break;
             case JOB_SHA256PASSSALT: case JOB_SHA256SALTPASS: fam |= 1u << FAM_SHA256; break;
             case JOB_SHA512PASSSALT: case JOB_SHA512SALTPASS: fam |= 1u << FAM_HMAC_SHA512; break;
-            case JOB_SHA512CRYPT: fam |= 1u << FAM_SHA512CRYPT; break;
+            case JOB_SHA512CRYPT: case JOB_SHA512CRYPTMD5:
+              fam |= 1u << FAM_SHA512CRYPT; break;
             case JOB_SHA256CRYPT: fam |= 1u << FAM_SHA256CRYPT; break;
             case JOB_DESCRYPT: fam |= 1u << FAM_DESCRYPT; break;
             case JOB_BCRYPT: fam |= 1u << FAM_BCRYPT; break;
+            case JOB_RMD160: fam |= 1u << FAM_RMD160UNSALTED; break;
+            case JOB_BLAKE2S256: fam |= 1u << FAM_BLAKE2S256UNSALTED; break;
           }
 	  if (fam & FAM_MD5SALT) {
 	    linehints[lsi].lineswanted = UINT_MAX;

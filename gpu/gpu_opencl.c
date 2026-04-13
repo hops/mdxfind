@@ -269,6 +269,7 @@ void gpu_opencl_list_devices(void) {
 
 /* ---- GPU device filter ---- */
 extern int gpu_device_filter_set;
+extern int GPUForce;
 extern int gpu_device_allowed[];
 
 static int device_allowed(int idx) {
@@ -377,7 +378,7 @@ static const struct {
     {"hmac_sha384_ksalt_batch", {JOB_HMAC_SHA384, -1}, FAM_HMAC_SHA512},
     {"hmac_sha384_kpass_batch", {JOB_HMAC_SHA384_KPASS, -1}, FAM_HMAC_SHA512},
     {"sql5_unsalted_batch",    {JOB_SQL5, -1}, FAM_SHA1UNSALTED},
-    {"sql5_unsalted_batch",    {JOB_SHA1RAW, -1}, FAM_SHA1UNSALTED},
+    {"sha1raw_unsalted_batch", {JOB_SHA1RAW, -1}, FAM_SHA1UNSALTED},
     {"md5raw_unsalted_batch",  {JOB_MD5RAW, -1}, FAM_MD5UNSALTED},
     {"sha384raw_unsalted_batch", {JOB_SHA384RAW, -1}, FAM_SHA512UNSALTED},
     {"sha512raw_unsalted_batch", {JOB_SHA512RAW, -1}, FAM_SHA512UNSALTED},
@@ -393,7 +394,7 @@ static const struct {
     {"hmac_streebog256_ksalt_batch",   {JOB_HMAC_STREEBOG256_KSALT, -1}, FAM_STREEBOG},
     {"hmac_streebog512_kpass_batch",   {JOB_HMAC_STREEBOG512_KPASS, -1}, FAM_STREEBOG},
     {"hmac_streebog512_ksalt_batch",   {JOB_HMAC_STREEBOG512_KSALT, -1}, FAM_STREEBOG},
-    {"sha512crypt_batch",              {JOB_SHA512CRYPT, -1}, FAM_SHA512CRYPT},
+    {"sha512crypt_batch",              {JOB_SHA512CRYPT, JOB_SHA512CRYPTMD5, -1}, FAM_SHA512CRYPT},
     {"sha256crypt_batch",              {JOB_SHA256CRYPT, -1}, FAM_SHA256CRYPT},
     {"rmd160_unsalted_batch",          {JOB_RMD160, -1}, FAM_RMD160UNSALTED},
     {"blake2s256_unsalted_batch",      {JOB_BLAKE2S256, -1}, FAM_BLAKE2S256UNSALTED},
@@ -1010,10 +1011,15 @@ uint32_t *gpu_opencl_dispatch_batch(int dev_idx,
     cl_kernel kern = (cat == GPU_CAT_SALTED && _max_iter > 1 && d->kern_salt_iter) ? d->kern_salt_iter : gk->kernel;
     cl_int err;
 
-    /* Upload words — unsalted pre-padded uses 64-byte stride, others 256 */
+    /* Upload words — determine stride based on op type.
+     * Unsalted pre-padded data from gpu_try_pack_unsalted uses per-type strides.
+     * Salted password data uses 256-byte stride. */
     int word_stride;
-    if (cat == GPU_CAT_MASK && num_words > GPUBATCH_MAX) {
-        if (_gpu_op == JOB_SHA512 || _gpu_op == JOB_SHA384)
+    if ((cat == GPU_CAT_MASK || cat == GPU_CAT_UNSALTED) &&
+        (num_words > GPUBATCH_MAX || GPUForce)) {
+        /* Pre-padded data at per-type stride (from gpu_try_pack_unsalted) */
+        if (_gpu_op == JOB_SHA512 || _gpu_op == JOB_SHA384 ||
+            _gpu_op == JOB_SHA512RAW || _gpu_op == JOB_SHA384RAW)
             word_stride = 128;
         else if (_gpu_op == JOB_MD6256)
             word_stride = 712;
@@ -1026,7 +1032,7 @@ uint32_t *gpu_opencl_dispatch_batch(int dev_idx,
         else if (_gpu_op == JOB_KECCAK512 || _gpu_op == JOB_SHA3_512)
             word_stride = 80;
         else
-            word_stride = 64;  /* MD5, MD4, SHA1, SHA224, SHA256, WRL */
+            word_stride = 64;
     } else {
         word_stride = 256;
     }

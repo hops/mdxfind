@@ -33,6 +33,7 @@ mdxfind supports GPU acceleration via OpenCL (NVIDIA, AMD) and Metal (Apple Sili
 - **Salted hashes**: MD5SALT, MD5SALTPASS/PASSSALT, SHA1/SHA256/SHA512 salted variants, HMAC types, DES crypt, MD5 crypt, SHA256/SHA512 crypt, PHPBB3
 - **Bcrypt**: Full eksblowfish implementation — 620 h/s on RTX 4070 Ti Super (faster than hashcat)
 - **Unsalted iteration** (`-i`): MD5, SHA1, SHA256, MD4/NTLM, SHA512 with GPU hex-iteration loops
+- **RAW binary iteration** (`-i`): MD5RAW, SHA1RAW, SHA256RAW, SHA384RAW, SHA512RAW — binary re-hash (not hex) on GPU
 - **Mask expansion** (`-n`/`-N`): Combined with iteration on GPU — 4.58 Gh/s on Apple M2 Max (MD5 `-i 100 -n '?d?d'`)
 
 On a 5-GPU system (2x AMD RDNA3 + RTX 4070 Ti + RTX 3080 + AMD iGPU), mdxfind solved 1,000,000 salted MD5 hashes against the rockyou wordlist in 40 seconds at 69 GH/s. See [docs/BENCHMARK.md](docs/BENCHMARK.md) for detailed GPU performance comparisons.
@@ -81,6 +82,7 @@ mdxfind is designed for processing very large hash collections (100+ million has
 - Append or prepend character masks to each candidate
 - Handle salts, usernames, peppers, and suffixes from separate files or embedded in the hash file
 - Deduplicate wordlists on the fly
+- Read compressed wordlists directly (gzip, bzip2, XZ/LZMA, Zstandard, ZIP)
 - Expand passwords to Unicode, XML-escape special characters, or munge email addresses
 - Rotate calculated hashes to match truncated or manipulated input hashes
 - Output results in a standardized `TYPE hash[:salt]:password` format consumed by mdsplit
@@ -226,6 +228,31 @@ d06be999220ca97b73b14db78492be76:Kp
 8e1856406c4f9f18ae1717b6f88fde35:a
 ```
 
+### Compressed Wordlists
+
+mdxfind can read compressed wordlists directly — no need to decompress before processing. The compression format is auto-detected from the file header (magic bytes), not the file extension. Supported formats:
+
+| Format | Extensions | Library |
+|--------|-----------|---------|
+| gzip | `.gz` | zlib |
+| bzip2 | `.bz2` | libbz2 |
+| XZ / LZMA | `.xz`, `.lzma` | liblzma |
+| Zstandard | `.zst` | libzstd |
+| ZIP | `.zip` | zlib (deflate) |
+
+```bash
+# Use compressed wordlists directly
+mdxfind -m e1 -f hashes.txt rockyou.txt.gz
+
+# Mix compressed and uncompressed
+mdxfind -m e1 -f hashes.txt dict1.txt.zst dict2.txt.bz2 plain.txt
+
+# Pipe compressed data via stdin wordlist
+mdxfind -m e1 -f hashes.txt < wordlist.xz
+```
+
+ZIP files are processed as single-entry archives (the first entry is read). For multi-entry ZIP files, extract first or use a tool like `unzip -p` to pipe the contents.
+
 ### Output Format
 
 Solved hashes go to stdout in the format:
@@ -252,66 +279,69 @@ Progress and statistics go to stderr.
 
 ```bash
 # Simple MD5 search
-mdxfind -h MD5 -f md5hashes.txt wordlist.txt
+mdxfind -m e1 -f md5hashes.txt wordlist.txt
 
-# All types, multiple wordlists
-mdxfind -h '.' -f hashes.txt dict1.txt dict2.txt dict3.txt
+# MD5 + SHA1 + NTLM
+mdxfind -m e1,e8,e369 -f hashes.txt wordlist.txt
+
+# Multiple wordlists
+mdxfind -m e1 -f hashes.txt dict1.txt dict2.txt dict3.txt
 
 # Read hashes from stdin
-cat hashes.txt | mdxfind -h '.' wordlist.txt
+cat hashes.txt | mdxfind -m e1-e12 wordlist.txt
 ```
 
 ### Salted hashes
 
 ```bash
-# External salt file
-mdxfind -h MD5SALT -f hashes.txt -s salts.txt wordlist.txt
+# External salt file (MD5SALTPASS)
+mdxfind -m e394 -f hashes.txt -s salts.txt wordlist.txt
 
-# Embedded salts with -F
+# Embedded salts with -F (MD5PASSSALT)
 mdxfind -M e373 -F hash_salt_file.txt wordlist.txt
 
-# Salts + usernames
-mdxfind -h '.' -f hashes.txt -s salts.txt -u users.txt wordlist.txt
+# Multiple salted types with salts + usernames
+mdxfind -m e394,e385,e412 -f hashes.txt -s salts.txt -u users.txt wordlist.txt
 ```
 
 ### Rules and masks
 
 ```bash
 # Apply hashcat-style rules
-mdxfind -h '.' -f hashes.txt -r rules.txt wordlist.txt
+mdxfind -m e1 -f hashes.txt -r rules.txt wordlist.txt
 
 # Append 2 digits
-mdxfind -h '.' -f hashes.txt -n 2 wordlist.txt
+mdxfind -m e1 -f hashes.txt -n 2 wordlist.txt
 
 # Append custom mask (letter + digit)
-mdxfind -h '.' -f hashes.txt -n '?l?d' wordlist.txt
+mdxfind -m e1 -f hashes.txt -n '?l?d' wordlist.txt
 
 # Prepend 4 digits
-mdxfind -h '.' -f hashes.txt -N 4 wordlist.txt
+mdxfind -m e1 -f hashes.txt -N 4 wordlist.txt
 
 # Combine rules with mask
-mdxfind -h '.' -f hashes.txt -r rules.txt -n 2 wordlist.txt
+mdxfind -m e1 -f hashes.txt -r rules.txt -n 2 wordlist.txt
 ```
 
 ### Iterated hashes
 
 ```bash
-# Up to 5 iterations
-mdxfind -h '.' -f hashes.txt -i 5 wordlist.txt
+# Up to 5 iterations (MD5)
+mdxfind -m e1 -f hashes.txt -i 5 wordlist.txt
 
 # SHA256CRYPT with specific iterations
-mdxfind -h SHA256CRYPT -f hashes.txt -i 5000 wordlist.txt
+mdxfind -m 7400 -f hashes.txt -i 5000 wordlist.txt
 ```
 
 ### Full pipeline with mdsplit
 
 ```bash
 # Crack and sort results by type
-cat *.txt | mdxfind -h '.' -i 5 -s salts.txt wordlist.txt | mdsplit *.txt
+cat *.txt | mdxfind -m e1,e8,e10 -i 5 -s salts.txt wordlist.txt | mdsplit *.txt
 
 # Multi-pass until convergence
 for pass in 1 2 3; do
-  mdxfind -f unsolved.txt -h '.' -i 5 -s salts.txt wordlist.txt | mdsplit unsolved.txt
+  mdxfind -f unsolved.txt -m e1,e8,e10 -i 5 -s salts.txt wordlist.txt | mdsplit unsolved.txt
 done
 ```
 
@@ -319,16 +349,16 @@ done
 
 ```bash
 # Limit to 8 threads
-mdxfind -h '.' -f hashes.txt -t 8 wordlist.txt
+mdxfind -m e1 -f hashes.txt -t 8 wordlist.txt
 
 # Deduplicate wordlists on the fly
-mdxfind -h '.' -f hashes.txt -d wordlist.txt
+mdxfind -m e1 -f hashes.txt -d wordlist.txt
 
 # Recurse into directory of wordlists
-mdxfind -h '.' -f hashes.txt -y /path/to/wordlists/
+mdxfind -m e1 -f hashes.txt -y /path/to/wordlists/
 
 # Skip first 1M lines of wordlist (resume)
-mdxfind -h '.' -f hashes.txt -w 1000000 wordlist.txt
+mdxfind -m e1 -f hashes.txt -w 1000000 wordlist.txt
 ```
 
 ## Architecture
@@ -664,7 +694,7 @@ docker build . -t csp/mdxfind
 
 ```bash
 # Run mdxfind
-docker run -v ${PWD}:/data -it --rm csp/mdxfind -h MD5 -f /data/hashes.txt /data/wordlist.txt
+docker run -v ${PWD}:/data -it --rm csp/mdxfind -m e1 -f /data/hashes.txt /data/wordlist.txt
 
 # Run mdsplit
 docker run -v ${PWD}:/data -it --rm --entrypoint mdsplit csp/mdxfind -f /data/results.txt /data/*.txt
@@ -690,6 +720,10 @@ mdxfind requires the following static libraries (all built automatically by `mak
 | [yescrypt](https://github.com/openwall/yescrypt) | `yescrypt/*.o` | yescrypt/scrypt KDF |
 | [PCRE](https://github.com/luvit/pcre) 8.45 | `libpcre.a` | Perl-compatible regular expressions (for `-h` type selection) |
 | LM hash | `lm/lm.a` | LM/NTLM hash support (bundled) |
+| [zlib](https://github.com/madler/zlib) | `-lz` | gzip and ZIP decompression for compressed wordlists |
+| [liblzma](https://github.com/tukaani-project/xz) | `-llzma` | XZ/LZMA decompression for compressed wordlists |
+| [libbz2](https://sourceware.org/bzip2/) | `-lbz2` | bzip2 decompression for compressed wordlists |
+| [libzstd](https://github.com/facebook/zstd) | `-lzstd` | Zstandard decompression for compressed wordlists |
 
 ### Known Build Issues
 
