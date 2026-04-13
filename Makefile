@@ -260,7 +260,8 @@ distclean: clean
 # mdxfind source tree so that "make" finds them without additional
 # configuration.
 #
-# Requires: git, a C compiler, make, autotools (for mhash/Judy), yasm.
+# Requires: git, a C compiler, make, autotools (for mhash/Judy), nasm/yasm.
+# On Debian/Ubuntu, run: make setup
 # ======================================================================
 
 DEPDIR = $(TOPDIR)/deps
@@ -385,6 +386,7 @@ dep-mhash:
 	fi; \
 	echo "  verified $$GOT"; \
 	cd $(DEPDIR)/mhash && \
+	libtoolize --force --copy --install && \
 	autoreconf -i && \
 	CFLAGS="-O2 -w -std=gnu89" ./configure --enable-static --disable-shared && \
 	$(MAKE); \
@@ -583,7 +585,21 @@ dep-zstd:
 	cp $(DEPDIR)/zstd/lib/zstd_errors.h $(TOPDIR)/; \
 	echo "  libzstd.a installed"
 
-.PHONY: all clean distclean deps \
+# ---- System prerequisites (Debian/Ubuntu) ----
+# Install build tools and dev libraries needed by 'make deps' and 'make'.
+setup:
+	@echo "==> Installing build prerequisites (requires sudo)"
+	sudo apt-get update -qq
+	sudo apt-get install -y \
+		build-essential git \
+		autoconf automake autopoint libtool libtool-bin \
+		nasm \
+		librhash-dev liblzma-dev libzstd-dev libbz2-dev
+	@echo ""
+	@echo "Prerequisites installed. Run 'make deps' to build libraries,"
+	@echo "then 'make' to build mdxfind."
+
+.PHONY: all clean distclean deps setup \
         dep-openssl dep-sphlib dep-mhash dep-rhash dep-md6 \
         dep-streebog dep-bcrypt dep-judy dep-yescrypt dep-pcre \
         dep-bzip2 dep-xz dep-zstd
