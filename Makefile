@@ -165,7 +165,7 @@ gpu_metal.o: gpu_metal.m gpu_metal.h gpujob.h job_types.h \
              gpu/metal_hmac_rmd160_str.h gpu/metal_hmac_rmd320_str.h gpu/metal_hmac_blake2s_str.h \
              gpu/metal_streebog_str.h gpu/metal_sha256crypt_str.h gpu/metal_sha512crypt_str.h \
              gpu/metal_rmd160unsalted_str.h gpu/metal_blake2s256unsalted_str.h \
-             gpu/metal_bcrypt_str.h
+             gpu/metal_bcrypt_str.h gpu/metal_sha1_str.h gpu/metal_md5crypt_str.h
 	$(CC) -x objective-c++ $(CFLAGS) -std=c++11 -c gpu_metal.m
 
 gpujob_metal.o: gpujob_metal.m gpujob.h job_types.h gpu_metal.h mdxfind.h
@@ -206,6 +206,9 @@ gpu/gpujob_opencl.o: gpu/gpujob_opencl.c gpu/gpu_opencl.h gpujob.h job_types.h m
 gpu/opencl_dynload.o: gpu/opencl_dynload.c gpu/opencl_dynload.h
 	$(CC) -DOPENCL_GPU=1 -DCL_TARGET_OPENCL_VERSION=120 -I. -Igpu $(INCEXTRA) -O3 -pthread -c gpu/opencl_dynload.c -o gpu/opencl_dynload.o
 endif
+
+# _str.h files are pre-generated on the dev machine and committed directly.
+# The .cl/.metal kernel sources are NOT published to this repository.
 
 mdsplit.o: mdsplit.c
 	$(CC) $(CFLAGS) -c mdsplit.c
