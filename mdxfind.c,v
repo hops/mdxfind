@@ -1,4 +1,27 @@
-#include <stdio.h>
+head	1.1;
+access;
+symbols;
+locks
+	dlr:1.1; strict;
+comment	@ * @;
+
+
+1.1
+date	2026.04.14.23.09.22;	author dlr;	state Exp;
+branches;
+next	;
+
+
+desc
+@@
+
+
+1.1
+log
+@Move NoMetal outside GPU_ENABLED guard for non-GPU platform builds
+@
+text
+@#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -183,12 +206,9 @@ int Neon;
 #define mysha1 SHA1
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.306 2026/04/14 23:13:53 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.305 2026/04/14 23:00:05 dlr Exp dlr $";
 /*
  * $Log: mdxfind.c,v $
- * Revision 1.306  2026/04/14 23:13:53  dlr
- * NoMetal global for all platforms; -G none works without GPU; other -G options error on non-GPU builds
- *
  * Revision 1.305  2026/04/14 23:00:05  dlr
  * GPU API v2: 128-byte params struct (uint64 first, zero padding), GPU_HIT_STRIDE 19 universal hit entry, POWER8 AltiVec MD5SALT/PHPBB3 SIMD, outbuf overflow fix, word_stride extraction fix
  *
@@ -547,7 +567,7 @@ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.306 202
  * CRAMMD5-DOVECOT uses TYPEOPT_NEEDSJ (not NEEDSF) to avoid hex fast-path.
  * Uses sph_md5 intermediate state (no finalization) matching hashcat mode 16400.
  *
- * Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+ * Co-Authored-By: Claude Opus 4.6 <noreply@@anthropic.com>
  *
  * Revision 1.200  2026/03/08 16:32:53  dlr
  * Add SAP-BCODE/BCODE4/PASSCODE/PASSCODE5/AS400-DES procjob+loading+bootstrap; fix CRAMMD5 output (reconstruct response b64 with new HMAC); fix RACF output (HASH:USER format); add sapb_trans_tbl/bcodeArray tables
@@ -683,12 +703,12 @@ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.306 202
  * Revision 1.166  2026/02/26 22:41:50  dlr
  * Removed Typelock: SPV decrements use PV_DEC, default salt creation moved to init_default_salts() called from main before procjob launch
  *
- * Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+ * Co-Authored-By: Claude Opus 4.6 <noreply@@anthropic.com>
  *
  * Revision 1.165  2026/02/26 17:18:38  dlr
  * Saltloaded/Userloaded tracking: fixed PV==1 to PV==0 (first insertion), added Saltloaded[] to all 17 store_typesalt callers
  *
- * Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+ * Co-Authored-By: Claude Opus 4.6 <noreply@@anthropic.com>
  *
  * Revision 1.164  2026/02/26 15:05:39  dlr
  * PV_DEC macro: atomic CAS decrement with underflow guard, replaces 145 possess/release blocks
@@ -1784,10 +1804,6 @@ static void blake2b_hash(unsigned char *out, size_t outlen,
 int NoMarkSalt, Hexkey, Rotatehash, Unicode, Dedupe, XMLchar, Email, Printall;
 #ifdef GPU_ENABLED
 int NoMetal;
-#else
-int NoMetal = 1;   /* no GPU compiled in — always disabled */
-#endif
-#ifdef GPU_ENABLED
 int gpu_device_filter_set = 0;     /* 1 if -G specified device list */
 int GPUForce = 0;                  /* 1 = -G force: bypass minimum work thresholds */
 int gpu_device_allowed[64];        /* per-device allow flags */
@@ -2681,7 +2697,7 @@ inline char *findeol(char *s, int l) {
 
 #ifndef NOTINTEL
 // PHC submission:  POMELO v2
-// Designed by:     Hongjun Wu (Email: wuhongjun@gmail.com)
+// Designed by:     Hongjun Wu (Email: wuhongjun@@gmail.com)
 // This code was written by Hongjun Wu on Jan 31, 2015.
 
 // This code gives the C implementation of POMELO using the SSE2 instructions.
@@ -6931,7 +6947,7 @@ static const struct { int job; const char *salt; } default_salts[] = {
   { JOB_SHA512PASSSALT, "administrator" },
   { JOB_SHA1_SALT_UTF16_PEPPER, "f5g= of8=" },
   { JOB_SHA1_SALT_SPECIAL, "yD7FvdKF65umfp2Xmjrm" },
-  { JOB_MD5SHA1PASSSALT, "xCg532%@%gdvf^5DGaa6&*rFTfg^FD4$OIFThrR_gh(ugf*/" },
+  { JOB_MD5SHA1PASSSALT, "xCg532%@@%gdvf^5DGaa6&*rFTfg^FD4$OIFThrR_gh(ugf*/" },
   { JOB_SHA1PASSSALT, "administrator" },
   { JOB_SHA1MD5SHA1PASSSALT, "administrator" },
   { JOB_SHA1_8TRACK, "administrator" },
@@ -7045,7 +7061,7 @@ static const struct { int job; const char *salt; } default_salts[] = {
   { JOB_ORACLE7, "7284616727" },
   { JOB_NETNTLMV1, "::WG:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:1122334455667788" },
   { JOB_NETNTLMV2, "user::domain:1122334455667788:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:01010000000000000000000000000000aabbccdd1122334400000000" },
-  { JOB_LASTPASS, "100100:pmix@trash-mail.com:9b071db7b8e265d4cadd3eb65ac0864a" },
+  { JOB_LASTPASS, "100100:pmix@@trash-mail.com:9b071db7b8e265d4cadd3eb65ac0864a" },
   { JOB_FORTIGATE, "142221334214210545260703" },
   { JOB_DOMINO8, "30313730353737313232383031313430:5000:3032" },
   { JOB_SIPHASH, "47356410265714355482333327356688" },
@@ -9284,7 +9300,7 @@ while (1) {
       d = Origline;
       s = cur;
       for (x = emaillen = 0; x < len; x++, s++) {
-	if (*s == '@')
+	if (*s == '@@')
 	  break;
 	if (*s == '.')
 	  continue;
@@ -15385,7 +15401,7 @@ SHA1_saltpepper:
               case JOB_SHA1_MD5PEPPER_MD5SALTMD5PASS:
 	      pep = Typepepper[job->op]; if (!pep) pep = combo_pepper;
 	      if (!pep)
-	        pep = "\x08@gmail.c\x00\xff";
+	        pep = "\x08@@gmail.c\x00\xff";
 morepep:
 		if (*pep == eofsalt)
 		   break;
@@ -20200,7 +20216,7 @@ sha11saltmd5:
 
 		pep = Typepepper[job->op]; if (!pep) pep = combo_pepper;
 		if (!pep) 
-		  pep = "\x08@gmail.c\x00\xff";
+		  pep = "\x08@@gmail.c\x00\xff";
 morepep1:
 		if (*pep == eofsalt) 
 		   break;
@@ -22852,13 +22868,13 @@ md5sha256:
                 for (; x < len; x++) {
                   char c;
                   c = cur[x];
-                  if (c == '@')
+                  if (c == '@@')
                     break;
                   if (c >= 'A' && c <= 'Z')
                     c += 0x20;
                   *d++ = c;
                 }
-                if (cur[x] != '@')
+                if (cur[x] != '@@')
                   break;
                 for (; x < len; x++) {
                   char c;
@@ -22966,7 +22982,7 @@ md5sha256:
                       actlen[x] = ljob[x].len + user_len + 2;
                       y = ljob[x + 1].len;
                       strncpy(&ljob[x + 1].pass[y], amemail, email_len);
-                      strcpy(&ljob[x + 1].pass[y + email_len], ":73@^bhhs&#@&^@8@*$");
+                      strcpy(&ljob[x + 1].pass[y + email_len], ":73@@^bhhs&#@@&^@@8@@*$");
                       actlen[x + 1] = y + user_len + email_len + 2 + 19;
                     }
 #ifndef NOTINTEL
@@ -23087,7 +23103,7 @@ md5sha256:
                             d = ljob[ljobi].pass + len;
                             i = 0;
                             while (*s) { *d++ = *s++; i++; }
-                            s = ":73@^bhhs&#@&^@8@*$";
+                            s = ":73@@^bhhs&#@@&^@@8@@*$";
                             while (*s) *d++ = *s++;
                             actlen[ljobi] += i + 19;
                           }
@@ -30607,7 +30623,7 @@ HAV256_5_start:
                     Word_t *PV2;
                     JSLG(PV2, JudyJ[JOB_QNX_MD5], (unsigned char *)mdbuf);
                     if (Printall || (PV2 && *PV2 == 0)) {
-                      snprintf(linebuf, MAXLINE, "@m,%d@%s@%s", iter, mdbuf, salt_str);
+                      snprintf(linebuf, MAXLINE, "@@m,%d@@%s@@%s", iter, mdbuf, salt_str);
                       if (!Printall) {
                         *PV2 = 1;
                         PV_DEC(saltsnap[si].PV);
@@ -30658,7 +30674,7 @@ HAV256_5_start:
                     Word_t *PV2;
                     JSLG(PV2, JudyJ[JOB_QNX_SHA256], (unsigned char *)mdbuf);
                     if (Printall || (PV2 && *PV2 == 0)) {
-                      snprintf(linebuf, MAXLINE, "@s,%d@%s@%s", iter, mdbuf, salt_str);
+                      snprintf(linebuf, MAXLINE, "@@s,%d@@%s@@%s", iter, mdbuf, salt_str);
                       if (!Printall) {
                         *PV2 = 1;
                         PV_DEC(saltsnap[si].PV);
@@ -30711,7 +30727,7 @@ HAV256_5_start:
                     Word_t *PV2;
                     JSLG(PV2, JudyJ[JOB_QNX_SHA512], (unsigned char *)mdbuf);
                     if (Printall || (PV2 && *PV2 == 0)) {
-                      snprintf(linebuf, MAXLINE, "@S,%d@%s@%s", iter, mdbuf, salt_str);
+                      snprintf(linebuf, MAXLINE, "@@S,%d@@%s@@%s", iter, mdbuf, salt_str);
                       if (!Printall) {
                         *PV2 = 1;
                         PV_DEC(saltsnap[si].PV);
@@ -30729,7 +30745,7 @@ HAV256_5_start:
               case JOB_QNX7_SHA512:
                 /* QNX 7 /etc/shadow (19210): PBKDF2-HMAC-SHA512(pass, salt, iter, 64)
                  * Typesalt = "iter:base64salt"
-                 * JudyJ key = full @S@... format string
+                 * JudyJ key = full @@S@@... format string
                  * Buffer layout:
                  *   tsalt[0..255]   decoded salt (up to 256 bytes)
                  *   newbuf[0..63]   PBKDF2 output (64 bytes)
@@ -30765,13 +30781,13 @@ HAV256_5_start:
                       /* -z mode: base64-encode the 64-byte output */
                       int b64len = b64_encode((char *)qnx_dk, linebuf2, 64);
                       linebuf2[b64len] = 0;
-                      snprintf(linebuf, MAXLINE, "@S,%d@%s@%s", iter, linebuf2, b64salt);
+                      snprintf(linebuf, MAXLINE, "@@S,%d@@%s@@%s", iter, linebuf2, b64salt);
                       prfound(job, linebuf);
                     } else {
                       /* Reconstruct format and look up */
                       int b64len = b64_encode((char *)qnx_dk, linebuf2, 64);
                       linebuf2[b64len] = 0;
-                      snprintf(linebuf, MAXLINE, "@S,%d@%s@%s", iter, linebuf2, b64salt);
+                      snprintf(linebuf, MAXLINE, "@@S,%d@@%s@@%s", iter, linebuf2, b64salt);
                       /* Try JudyJ with the computed format */
                       Word_t *PV2;
                       JSLG(PV2, JudyJ[JOB_QNX7_SHA512], (unsigned char *)linebuf);
@@ -36536,27 +36552,27 @@ static void load_hash_file(gzFile gi, const char *filename, Pvoid_t *pDoload) {
         }
       }
     }
-    /* QNX /etc/shadow (19000/19100/19200/19210): @X@HASH@SALT or @X,ITER@HASH@SALT */
+    /* QNX /etc/shadow (19000/19100/19200/19210): @@X@@HASH@@SALT or @@X,ITER@@HASH@@SALT */
     if ((lf[JOB_QNX_MD5] || lf[JOB_QNX_SHA256] || lf[JOB_QNX_SHA512] || lf[JOB_QNX7_SHA512])
-        && len > 6 && line[0] == '@' && (line[1] == 'm' || line[1] == 's' || line[1] == 'S')) {
+        && len > 6 && line[0] == '@@' && (line[1] == 'm' || line[1] == 's' || line[1] == 'S')) {
       int sl = mystrlen(line);
       while (sl > 0 && (line[sl-1] == '\r' || line[sl-1] == '\n'))
         line[--sl] = 0;
       char type_ch = line[1];
-      /* Parse optional iteration count: @X@ or @X,ITER@ */
+      /* Parse optional iteration count: @@X@@ or @@X,ITER@@ */
       int iter = 1000;
-      char *at2; /* second @ */
+      char *at2; /* second @@ */
       if (line[2] == ',') {
         iter = atoi(line + 3);
-        at2 = strchr(line + 3, '@');
-      } else if (line[2] == '@') {
+        at2 = strchr(line + 3, '@@');
+      } else if (line[2] == '@@') {
         at2 = line + 2;
       } else {
         at2 = NULL;
       }
       if (at2 && iter > 0) {
         char *hash_start = at2 + 1;
-        char *at3 = strchr(hash_start, '@');
+        char *at3 = strchr(hash_start, '@@');
         if (at3 && at3 > hash_start) {
           int hash_hexlen = at3 - hash_start;
           char *salt_start = at3 + 1;
@@ -36587,13 +36603,13 @@ static void load_hash_file(gzFile gi, const char *filename, Pvoid_t *pDoload) {
             if (hexok) {
               if (target_job == JOB_QNX7_SHA512) {
                 /* 19210: iter defaults to 4096 if not specified */
-                if (line[2] == '@') iter = 4096;
+                if (line[2] == '@@') iter = 4096;
               }
               /* JudyJ key = lowercase hex hash (19000/19100/19200) or normalized format (19210) */
               if (target_job == JOB_QNX7_SHA512) {
-                /* Normalize: always @S,iter@hash@salt */
+                /* Normalize: always @@S,iter@@hash@@salt */
                 char save = *at3; *at3 = 0;
-                snprintf(salttmp + MAXLINE/2, MAXLINE/2, "@S,%d@%s@%s", iter, hash_start, salt_start);
+                snprintf(salttmp + MAXLINE/2, MAXLINE/2, "@@S,%d@@%s@@%s", iter, hash_start, salt_start);
                 *at3 = save;
                 JSLI(PV, JudyJ[target_job], (unsigned char *)(salttmp + MAXLINE/2));
               } else {
@@ -40350,17 +40366,13 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Rule Histogram enabled\n");
         DoHistogram = 1;
         break;
-
+#ifdef GPU_ENABLED
       case 'G':
         /* -G <list> selects specific GPU devices by index.
          * Format: comma-separated IDs or ranges: 0,2,4 or 0-2,5,7-9
          * -G none or -G n/N disables GPU entirely.
          * -G list: enumerate GPU devices and exit immediately. */
-        if (optarg[0] == 'n' || optarg[0] == 'N') {
-          fprintf(stderr, "GPU disabled\n");
-          NoMetal = 1;
-#ifdef GPU_ENABLED
-        } else if (optarg[0] == 'l' || optarg[0] == 'L') {
+        if (optarg[0] == 'l' || optarg[0] == 'L') {
           fprintf(stderr, "Available GPU devices:\n");
 #if defined(OPENCL_GPU)
           gpu_opencl_list_devices();
@@ -40372,6 +40384,9 @@ int main(int argc, char **argv) {
           extern int GPUForce;
           GPUForce = 1;
           fprintf(stderr, "GPU force: all eligible words dispatched to GPU\n");
+        } else if (optarg[0] == 'n' || optarg[0] == 'N') {
+          fprintf(stderr, "GPU disabled\n");
+          NoMetal = 1;
         } else {
           /* Parse device list immediately — optarg is transient */
           extern int gpu_device_filter_set;
@@ -40395,13 +40410,8 @@ int main(int argc, char **argv) {
           }
           fprintf(stderr, "GPU device filter: %s\n", optarg);
         }
-#else
-        } else {
-          fprintf(stderr, "No GPU code present.\n");
-          exit(1);
-        }
-#endif
         break;
+#endif
 
       case 'q':
         Maxniter = atoi(optarg);
@@ -42993,7 +43003,7 @@ usage:
         if (RC && Printall) {
           JSLI(PV, JudyJ[JOB_LASTPASS], (unsigned char *)"02eb97e869e0ddc7dc760fc633b4b54d");
           if (!Typesalt[JOB_LASTPASS]) {
-            JSLI(PV, Typesalt[JOB_LASTPASS], (unsigned char *)"100100:pmix@trash-mail.com:9b071db7b8e265d4cadd3eb65ac0864a");
+            JSLI(PV, Typesalt[JOB_LASTPASS], (unsigned char *)"100100:pmix@@trash-mail.com:9b071db7b8e265d4cadd3eb65ac0864a");
             if (PV) *PV = 1;
           }
         } else {
@@ -45082,7 +45092,7 @@ bf_done:
 	    case '(':
 	    case ')':
 	    case 'e':
-	    case '@':
+	    case '@@':
 	        fprintf(stderr,"%c%c",*d1,d1[1]);
 		d++;
 		break;
@@ -45121,3 +45131,4 @@ bf_done:
 
 	    
 
+@
