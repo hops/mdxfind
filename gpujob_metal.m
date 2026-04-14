@@ -70,13 +70,13 @@ static const char *mask_charsets[] = {
 };
 static const int mask_csizes[] = { 10, 26, 26, 33, 95, 256 };
 
-static int mask_decode(uint32_t mask_idx, int pos_offset, int npos, char *buf) {
-    uint32_t idx = mask_idx;
+static int mask_decode(uint64_t mask_idx, int pos_offset, int npos, char *buf) {
+    uint64_t idx = mask_idx;
     int n_total = gpu_mask_n_prepend + gpu_mask_n_append;
     for (int i = npos - 1; i >= 0; i--) {
         int pos = pos_offset + i;
         int sz = gpu_mask_sizes[pos];
-        int ci = idx % sz;
+        int ci = (int)(idx % sz);
         idx /= sz;
         buf[i] = (char)gpu_mask_desc[n_total + pos * 256 + ci];
     }
@@ -704,7 +704,10 @@ void gpujob(void *arg) {
             goto return_jobg;
         }
 
-        /* Standard dispatch for non-PHPBB3 types */
+        /* Standard dispatch for non-PHPBB3 types.
+         * Loop: dispatch returns immediately on hits for processing.
+         * Re-dispatch continues from the resume point until keyspace exhausted. */
+        do {
         hits = gpu_metal_dispatch_batch(
             g->word_stride ? g->raw : g->hexhash[0], (const uint16_t *)g->hexlen,
             g->count, &nhits);
@@ -725,19 +728,15 @@ void gpujob(void *arg) {
         if (hits && nhits > 0) {
             salt_refresh = 1;
             int stored = nhits > GPU_MAX_RETURN ? GPU_MAX_RETURN : nhits;
-            int is_sha256 = (g->op == JOB_SHA256PASSSALT || g->op == JOB_SHA256SALTPASS ||
-                            g->op == JOB_HMAC_SHA224 || g->op == JOB_HMAC_SHA224_KPASS ||
-                            g->op == JOB_HMAC_SHA256 || g->op == JOB_HMAC_SHA256_KPASS ||
-                            g->op == JOB_SHA256CRYPT);
             int is_phpbb3 = (g->op == JOB_PHPBB3);
             int is_descrypt = (g->op == JOB_DESCRYPT);
             int is_bcrypt = (g->op == JOB_BCRYPT);
-            int hit_stride = is_sha256 ? 11
+            int hash_words = is_bcrypt ? 6 : gpu_hash_words(g->op);
+            int hexlen = hash_words * 8;
+            int has_iter = (Maxiter > 1 || op_cat == GPU_CAT_SALTPASS);
+            int hit_stride = (is_phpbb3 || is_descrypt) ? 6
                 : is_bcrypt ? 9
-                : (is_phpbb3 || is_descrypt) ? 6
-                : (Maxiter > 1 || op_cat == GPU_CAT_SALTPASS) ? 7 : 6;
-            int hash_words = is_sha256 ? 8 : is_bcrypt ? 6 : 4;
-            int hexlen = is_sha256 ? 64 : 32;
+                : has_iter ? (3 + hash_words) : (2 + hash_words);
             int overflow = (nhits > GPU_MAX_RETURN);
 
             /* On overflow, retry ALL words on CPU — partial hits may be stored */
@@ -746,14 +745,15 @@ void gpujob(void *arg) {
                 uint32_t *entry = hits + h * hit_stride;
                 int widx = entry[0];
                 int sidx = entry[1];
-                if ((unsigned)widx >= (unsigned)g->count || sidx < 0) continue;
+                if ((unsigned)widx >= (unsigned)g->count) continue;
+                if (op_cat != GPU_CAT_MASK && op_cat != GPU_CAT_UNSALTED && sidx < 0) continue;
                 if (op_cat != GPU_CAT_MASK && op_cat != GPU_CAT_UNSALTED &&
                     sidx >= nsalts_packed) continue;
 
 
 
                 int iter_num;
-                if (hit_stride >= 7) {
+                if (has_iter) {
                     iter_num = entry[2];
                     for (int w = 0; w < hash_words; w++)
                         curin.i[w] = entry[3 + w];
@@ -766,7 +766,12 @@ void gpujob(void *arg) {
                 if (op_cat == GPU_CAT_MASK || op_cat == GPU_CAT_UNSALTED) {
                     /* Mask/unsalted: reconstruct candidate from base word + mask index */
                     synthetic_job.Ruleindex = (widx < GPUBATCH_MAX) ? g->ruleindex[widx] : 0;
-                    uint32_t midx = entry[1];
+                    /* Recover full 64-bit mask_idx: hit stores (uint32)mask_idx,
+                     * reconstruct via mask_start + local_tid */
+                    uint32_t midx32 = entry[1];
+                    extern uint64_t gpu_metal_last_mask_start(void);
+                    uint64_t chunk_mask_start = gpu_metal_last_mask_start();
+                    uint64_t midx = chunk_mask_start + (uint64_t)(midx32 - (uint32_t)chunk_mask_start);
                     char *base_word;
                     int blen;
                     if (g->word_stride && widx < 4096 &&
@@ -779,20 +784,26 @@ void gpujob(void *arg) {
                         base_word = &g->passbuf[g->passoff[widx]];
                         blen = g->passlen[widx];
                     }
-                    uint32_t append_combos = 1;
-                    for (int mi = 0; mi < gpu_mask_n_append; mi++)
-                        append_combos *= gpu_mask_sizes[gpu_mask_n_prepend + mi];
-                    uint32_t prepend_idx = midx / append_combos;
-                    uint32_t append_idx = midx % append_combos;
                     char cand[256];
                     int clen = 0;
-                    if (gpu_mask_n_prepend > 0)
+                    if (gpu_mask_n_prepend > 0) {
+                        uint64_t append_combos = 1;
+                        for (int mi = 0; mi < gpu_mask_n_append; mi++)
+                            append_combos *= gpu_mask_sizes[gpu_mask_n_prepend + mi];
+                        uint64_t prepend_idx = midx / append_combos;
+                        uint64_t append_idx = midx % append_combos;
                         clen += mask_decode(prepend_idx, 0, gpu_mask_n_prepend, cand);
-                    memcpy(cand + clen, base_word, blen);
-                    clen += blen;
-                    if (gpu_mask_n_append > 0)
-                        clen += mask_decode(append_idx, gpu_mask_n_prepend,
-                                            gpu_mask_n_append, cand + clen);
+                        memcpy(cand + clen, base_word, blen);
+                        clen += blen;
+                        if (gpu_mask_n_append > 0)
+                            clen += mask_decode(append_idx, gpu_mask_n_prepend,
+                                                gpu_mask_n_append, cand + clen);
+                    } else {
+                        /* Append-only: midx is the full mask index */
+                        memcpy(cand, base_word, blen);
+                        clen = blen;
+                        clen += mask_decode(midx, 0, gpu_mask_n_append, cand + clen);
+                    }
                     cand[clen] = 0;
                     memcpy(synthetic_job.line, cand, clen + 1);
                     synthetic_job.clen = clen;
@@ -870,6 +881,14 @@ void gpujob(void *arg) {
                         PV_DEC(saltsnap[snap_idx].PV);
                 }
                 } /* end non-mask else */
+            }
+
+            /* Flush thread-local found count to Totfound */
+            if (*synthetic_job.found) {
+                possess(FreeWaiting);
+                Totfound += *synthetic_job.found;
+                release(FreeWaiting);
+                *synthetic_job.found = 0;
             }
 
             /* Hit buffer overflow: reprocess words that may have lost hits on CPU */
@@ -973,21 +992,16 @@ void gpujob(void *arg) {
         } /* op_cat scope */
 
 #ifdef GPU_DOUBLE_BUFFER
+        /* Hash count for mask/unsalted types is tracked per-chunk inside
+         * dispatch_batch via __sync_fetch_and_add(&Tothash). Only count
+         * here for salted types which don't have per-chunk updates. */
         { int op_cat_h = gpu_op_category(g->op);
-          if (op_cat_h == GPU_CAT_MASK || op_cat_h == GPU_CAT_UNSALTED) {
-            extern uint64_t gpu_mask_total;
-            uint64_t masks = gpu_mask_total > 0 ? gpu_mask_total : 1;
-            hashcnt += (uint64_t)g->count * masks * Maxiter;
-          } else
+          if (op_cat_h != GPU_CAT_MASK && op_cat_h != GPU_CAT_UNSALTED)
             hashcnt += (uint64_t)g->count * nsalts_packed * Maxiter;
         }
 #else
         { int op_cat_h = gpu_op_category(g->op);
-          if (op_cat_h == GPU_CAT_MASK || op_cat_h == GPU_CAT_UNSALTED) {
-            extern uint64_t gpu_mask_total;
-            uint64_t masks = gpu_mask_total > 0 ? gpu_mask_total : 1;
-            hashcnt += (uint64_t)g->count * masks * Maxiter;
-          } else
+          if (op_cat_h != GPU_CAT_MASK && op_cat_h != GPU_CAT_UNSALTED)
             hashcnt += (uint64_t)g->count * nsalts_packed * Maxiter;
         }
 #endif
@@ -1008,6 +1022,10 @@ void gpujob(void *arg) {
             hashcnt = 0;
             found = 0;
         }
+
+        /* Retry loop: if dispatch_batch returned early due to hits and more
+         * chunks remain (_mask_resume > 0), re-dispatch to continue. */
+        } while (nhits > 0 && gpu_metal_has_resume());
 
 return_jobg:
 #ifdef GPU_DOUBLE_BUFFER
@@ -1308,6 +1326,122 @@ int gpu_op_category(int op) {
 
 int is_gpu_op(int op) {
     return gpu_op_category(op) != GPU_CAT_NONE;
+}
+
+/* Map JOB_* op code to FAM_* family index for timing state.
+ * Derived from metal_kernel_map[] in gpu_metal.m. */
+int gpu_op_family(int op) {
+    switch (op) {
+    case JOB_MD5SALT: case JOB_MD5UCSALT: case JOB_MD5revMD5SALT:
+    case JOB_MD5sub8_24SALT:
+    case JOB_HMAC_MD5: case JOB_HMAC_MD5_KPASS:
+        return FAM_MD5SALT;
+    case JOB_MD5SALTPASS: case JOB_MD5PASSSALT:
+        return FAM_MD5SALTPASS;
+    case JOB_MD5_MD5SALTMD5PASS:
+        return FAM_MD5_MD5SALTMD5PASS;
+    case JOB_SHA256PASSSALT: case JOB_SHA256SALTPASS:
+    case JOB_HMAC_SHA256: case JOB_HMAC_SHA256_KPASS:
+    case JOB_HMAC_SHA224: case JOB_HMAC_SHA224_KPASS:
+        return FAM_SHA256;
+    case JOB_PHPBB3:
+        return FAM_PHPBB3;
+    case JOB_MD5CRYPT:
+        return FAM_MD5CRYPT;
+    case JOB_DESCRYPT:
+        return FAM_DESCRYPT;
+    case JOB_SHA1DRU:
+    case JOB_SHA1PASSSALT: case JOB_SHA1SALTPASS:
+    case JOB_HMAC_SHA1: case JOB_HMAC_SHA1_KPASS:
+        return FAM_SHA1;
+    case JOB_MD5: case JOB_MD5UC: case JOB_MD5RAW:
+        return FAM_MD5UNSALTED;
+    case JOB_MD4: case JOB_NTLMH:
+        return FAM_MD4UNSALTED;
+    case JOB_SHA1: case JOB_SHA1RAW: case JOB_SQL5:
+        return FAM_SHA1UNSALTED;
+    case JOB_SHA224: case JOB_SHA256: case JOB_SHA256RAW:
+        return FAM_SHA256UNSALTED;
+    case JOB_SHA384: case JOB_SHA384RAW:
+    case JOB_SHA512: case JOB_SHA512RAW:
+        return FAM_SHA512UNSALTED;
+    case JOB_WRL:
+        return FAM_WRLUNSALTED;
+    case JOB_MD6256:
+        return FAM_MD6256UNSALTED;
+    case JOB_KECCAK224: case JOB_KECCAK256: case JOB_KECCAK384: case JOB_KECCAK512:
+    case JOB_SHA3_224: case JOB_SHA3_256: case JOB_SHA3_384: case JOB_SHA3_512:
+        return FAM_KECCAKUNSALTED;
+    case JOB_SHA512PASSSALT: case JOB_SHA512SALTPASS:
+    case JOB_HMAC_SHA512: case JOB_HMAC_SHA512_KPASS:
+    case JOB_HMAC_SHA384: case JOB_HMAC_SHA384_KPASS:
+        return FAM_HMAC_SHA512;
+    case JOB_MYSQL3:
+        return FAM_MYSQL3UNSALTED;
+    case JOB_HMAC_RMD160: case JOB_HMAC_RMD160_KPASS:
+        return FAM_HMAC_RMD160;
+    case JOB_HMAC_RMD320: case JOB_HMAC_RMD320_KPASS:
+        return FAM_HMAC_RMD320;
+    case JOB_HMAC_BLAKE2S:
+        return FAM_HMAC_BLAKE2S;
+    case JOB_STREEBOG_32: case JOB_STREEBOG_64:
+    case JOB_HMAC_STREEBOG256_KPASS: case JOB_HMAC_STREEBOG256_KSALT:
+    case JOB_HMAC_STREEBOG512_KPASS: case JOB_HMAC_STREEBOG512_KSALT:
+        return FAM_STREEBOG;
+    case JOB_SHA512CRYPT: case JOB_SHA512CRYPTMD5:
+        return FAM_SHA512CRYPT;
+    case JOB_SHA256CRYPT:
+        return FAM_SHA256CRYPT;
+    case JOB_RMD160:
+        return FAM_RMD160UNSALTED;
+    case JOB_BLAKE2S256:
+        return FAM_BLAKE2S256UNSALTED;
+    case JOB_BCRYPT:
+        return FAM_BCRYPT;
+    default:
+        return -1;
+    }
+}
+
+int gpu_hash_words(int op) {
+    switch (op) {
+    case JOB_SHA512: case JOB_SHA512RAW:
+    case JOB_SHA512PASSSALT: case JOB_SHA512SALTPASS:
+    case JOB_WRL:
+    case JOB_STREEBOG_64:
+    case JOB_HMAC_SHA512: case JOB_HMAC_SHA512_KPASS:
+    case JOB_HMAC_STREEBOG512_KSALT: case JOB_HMAC_STREEBOG512_KPASS:
+    case JOB_KECCAK512: case JOB_SHA3_512:
+    case JOB_SHA512CRYPT: case JOB_SHA512CRYPTMD5:
+        return 16;
+    case JOB_SHA384: case JOB_SHA384RAW:
+    case JOB_HMAC_SHA384: case JOB_HMAC_SHA384_KPASS:
+    case JOB_KECCAK384: case JOB_SHA3_384:
+        return 12;
+    case JOB_SHA256: case JOB_SHA256RAW:
+    case JOB_SHA256PASSSALT: case JOB_SHA256SALTPASS:
+    case JOB_HMAC_SHA224: case JOB_HMAC_SHA224_KPASS:
+    case JOB_HMAC_SHA256: case JOB_HMAC_SHA256_KPASS:
+    case JOB_HMAC_STREEBOG256_KSALT: case JOB_HMAC_STREEBOG256_KPASS:
+    case JOB_HMAC_BLAKE2S:
+    case JOB_BLAKE2S256:
+    case JOB_KECCAK256: case JOB_SHA3_256:
+    case JOB_STREEBOG_32:
+    case JOB_MD6256:
+    case JOB_SHA256CRYPT:
+        return 8;
+    case JOB_SHA224:
+    case JOB_KECCAK224: case JOB_SHA3_224:
+        return 7;
+    case JOB_SHA1: case JOB_SHA1RAW: case JOB_SQL5:
+    case JOB_SHA1PASSSALT: case JOB_SHA1SALTPASS: case JOB_SHA1DRU:
+    case JOB_HMAC_SHA1: case JOB_HMAC_SHA1_KPASS:
+    case JOB_RMD160:
+    case JOB_HMAC_RMD160: case JOB_HMAC_RMD160_KPASS:
+        return 5;
+    default:
+        return 4;
+    }
 }
 
 #endif /* __APPLE__ && METAL_GPU */

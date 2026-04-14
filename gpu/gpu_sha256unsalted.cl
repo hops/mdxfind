@@ -6,10 +6,12 @@
  *   Kernel byte-swaps to big-endian before SHA256 compress.
  *
  * Dispatch: num_words × num_masks threads.
- * Hit stride: 6 (word_idx, mask_idx, h0, h1, h2, h3) or
- *             7 (word_idx, mask_idx, iter, h0, h1, h2, h3) when max_iter > 1
+ * Hit stride: 10 (word_idx, mask_idx, h0..h7) or
+ *             11 (word_idx, mask_idx, iter, h0..h7) when max_iter > 1
  */
 
+
+/* bswap32, SHA256_K[], sha256_block(), hex_byte_be64() provided by gpu_common.cl */
 
 /* Convert one byte to 2 packed hex chars (lowercase, BE word packing) */
 uint hex_byte_be(uint b) {
@@ -19,9 +21,7 @@ uint hex_byte_be(uint b) {
          |  (lo + ((lo < 10) ? '0' : ('a' - 10)));
 }
 
-/* Convert 8 SHA256 BE state words to 16 BE M[] words of hex text (lowercase).
- * 8 state words × 8 hex chars each = 64 hex chars = 16 M[] words.
- * Fills the entire M[0..15] block — padding must go in a second block. */
+/* Convert 8 SHA256 BE state words to 16 BE M[] words of hex text (lowercase) */
 void sha256_to_hex_lc(uint *state, uint *M) {
     for (int i = 0; i < 8; i++) {
         uint s = state[i];
@@ -32,56 +32,7 @@ void sha256_to_hex_lc(uint *state, uint *M) {
     }
 }
 
-uint bswap32(uint x) {
-    return ((x >> 24) & 0xffu) | ((x >> 8) & 0xff00u) |
-           ((x << 8) & 0xff0000u) | ((x << 24) & 0xff000000u);
-}
-
-__constant uint K256[64] = {
-    0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
-    0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
-    0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
-    0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
-    0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
-    0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
-    0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
-    0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
-    0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
-    0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
-    0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
-    0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
-    0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u,
-    0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
-    0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
-    0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
-};
-
-void sha256_compress(uint *state, uint *M) {
-    uint W[64];
-    for (int i = 0; i < 16; i++) W[i] = M[i];
-    for (int i = 16; i < 64; i++) {
-        uint s0 = rotate(W[i-15], (uint)25) ^ rotate(W[i-15], (uint)14) ^ (W[i-15] >> 3);
-        uint s1 = rotate(W[i-2], (uint)15) ^ rotate(W[i-2], (uint)13) ^ (W[i-2] >> 10);
-        W[i] = W[i-16] + s0 + W[i-7] + s1;
-    }
-
-    uint a = state[0], b = state[1], c = state[2], d = state[3];
-    uint e = state[4], f = state[5], g = state[6], h = state[7];
-
-    for (int i = 0; i < 64; i++) {
-        uint S1 = rotate(e, (uint)26) ^ rotate(e, (uint)21) ^ rotate(e, (uint)7);
-        uint ch = (e & f) ^ (~e & g);
-        uint t1 = h + S1 + ch + K256[i] + W[i];
-        uint S0 = rotate(a, (uint)30) ^ rotate(a, (uint)19) ^ rotate(a, (uint)10);
-        uint maj = (a & b) ^ (a & c) ^ (b & c);
-        uint t2 = S0 + maj;
-        h = g; g = f; f = e; e = d + t1;
-        d = c; c = b; b = a; a = t1 + t2;
-    }
-
-    state[0] += a; state[1] += b; state[2] += c; state[3] += d;
-    state[4] += e; state[5] += f; state[6] += g; state[7] += h;
-}
+#define sha256_compress sha256_block
 
 __kernel void sha256_unsalted_batch(
     __global const uint *words,
@@ -99,7 +50,7 @@ __kernel void sha256_unsalted_batch(
     OCLParams params = *params_buf;
     uint tid = get_global_id(0);
     uint word_idx = tid / params.num_masks;
-    uint mask_idx = params.mask_start + (tid % params.num_masks);
+    ulong mask_idx = params.mask_start + (tid % params.num_masks);
     if (word_idx >= params.num_words) return;
 
     __global const uint *src = words + word_idx * 16;
@@ -111,35 +62,58 @@ __kernel void sha256_unsalted_batch(
     uint n_app = params.n_append;
 
     if (n_pre > 0 || n_app > 0) {
-        uint append_combos = 1;
-        for (uint i = 0; i < n_app; i++)
-            append_combos *= mask_desc[n_pre + i];
-
-        uint prepend_idx = mask_idx / append_combos;
-        uint append_idx = mask_idx % append_combos;
+        uint n_total_m = n_pre + n_app;
 
         if (n_pre > 0) {
+            uint append_combos = 1;
+            for (uint i = 0; i < n_app; i++)
+                append_combos *= mask_desc[n_pre + i];
+            uint prepend_idx = (uint)(mask_idx / append_combos);
+            uint append_idx = (uint)(mask_idx % append_combos);
+
             uint pidx = prepend_idx;
             for (int i = (int)n_pre - 1; i >= 0; i--) {
                 uint sz = mask_desc[i];
-                uint n_total_m = n_pre + n_app;
                 uchar ch = mask_desc[n_total_m + i * 256 + (pidx % sz)];
                 pidx /= sz;
                 M[i >> 2] = (M[i >> 2] & ~(0xFFu << ((i & 3) << 3)))
                            | ((uint)ch << ((i & 3) << 3));
             }
-        }
 
-        if (n_app > 0) {
+            if (n_app > 0) {
+                int total_len = M[14] >> 3;
+                int app_start = total_len - (int)n_app;
+                uint aidx = append_idx;
+                for (int i = (int)n_app - 1; i >= 0; i--) {
+                    int pos_idx = n_pre + i;
+                    uint sz = mask_desc[pos_idx];
+                    uchar ch = mask_desc[n_total_m + pos_idx * 256 + (aidx % sz)];
+                    aidx /= sz;
+                    int pos = app_start + i;
+                    M[pos >> 2] = (M[pos >> 2] & ~(0xFFu << ((pos & 3) << 3)))
+                                 | ((uint)ch << ((pos & 3) << 3));
+                }
+            }
+        } else {
+            /* Append-only (brute-force): host pre-decomposes mask_start into
+             * per-position base offsets. Kernel does fast uint32 local
+             * decomposition and adds to base with carry. */
             int total_len = M[14] >> 3;
             int app_start = total_len - (int)n_app;
-            uint aidx = append_idx;
+            uint local_idx = tid % params.num_masks;
+            uint aidx = local_idx;
+            uint carry = 0;
             for (int i = (int)n_app - 1; i >= 0; i--) {
-                int pos_idx = n_pre + i;
-                uint sz = mask_desc[pos_idx];
-                uint n_total_m = n_pre + n_app;
-                uchar ch = mask_desc[n_total_m + pos_idx * 256 + (aidx % sz)];
+                uint sz = mask_desc[i];
+                uint local_digit = aidx % sz;
                 aidx /= sz;
+                uint base_digit = (i < 8)
+                    ? (uint)((params.mask_base0 >> (i * 8)) & 0xFF)
+                    : (uint)((params.mask_base1 >> ((i - 8) * 8)) & 0xFF);
+                uint sum = base_digit + local_digit + carry;
+                carry = sum / sz;
+                uint final_digit = sum % sz;
+                uchar ch = mask_desc[n_total_m + i * 256 + final_digit];
                 int pos = app_start + i;
                 M[pos >> 2] = (M[pos >> 2] & ~(0xFFu << ((pos & 3) << 3)))
                              | ((uint)ch << ((pos & 3) << 3));
@@ -159,13 +133,14 @@ __kernel void sha256_unsalted_batch(
     sha256_compress(state, M);
 
     uint max_iter = params.max_iter;
-    uint hit_stride = (max_iter > 1) ? 7 : 6;
+    /* SHA256: 8 hash words. hit_stride = 2 + 8 = 10, or 3 + 8 = 11 with iter */
+    uint hit_stride = (max_iter > 1) ? 11 : 10;
 
     for (uint iter = 1; iter <= max_iter; iter++) {
-        uint hx = bswap32(state[0]), hy = bswap32(state[1]);
-        uint hz = bswap32(state[2]), hw = bswap32(state[3]);
+        uint h[8];
+        for (int i = 0; i < 8; i++) h[i] = bswap32(state[i]);
 
-        if (probe_compact(hx, hy, hz, hw, compact_fp, compact_idx,
+        if (probe_compact(h[0], h[1], h[2], h[3], compact_fp, compact_idx,
                           params.compact_mask, params.max_probe, params.hash_data_count,
                           hash_data_buf, hash_data_off,
                           overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
@@ -174,14 +149,9 @@ __kernel void sha256_unsalted_batch(
                 uint base = slot * hit_stride;
                 hits[base]   = word_idx;
                 hits[base+1] = mask_idx;
-                if (hit_stride == 7) {
-                    hits[base+2] = iter;
-                    hits[base+3] = hx; hits[base+4] = hy;
-                    hits[base+5] = hz; hits[base+6] = hw;
-                } else {
-                    hits[base+2] = hx; hits[base+3] = hy;
-                    hits[base+4] = hz; hits[base+5] = hw;
-                }
+                int offset = 2;
+                if (max_iter > 1) { hits[base+2] = iter; offset = 3; }
+                for (int i = 0; i < 8; i++) hits[base+offset+i] = h[i];
                 mem_fence(CLK_GLOBAL_MEM_FENCE);
             }
         }
@@ -220,7 +190,7 @@ __kernel void sha224_unsalted_batch(
     OCLParams params = *params_buf;
     uint tid = get_global_id(0);
     uint word_idx = tid / params.num_masks;
-    uint mask_idx = params.mask_start + (tid % params.num_masks);
+    ulong mask_idx = params.mask_start + (tid % params.num_masks);
     if (word_idx >= params.num_words) return;
 
     __global const uint *src = words + word_idx * 16;
@@ -230,32 +200,56 @@ __kernel void sha224_unsalted_batch(
     uint n_pre = params.n_prepend;
     uint n_app = params.n_append;
     if (n_pre > 0 || n_app > 0) {
-        uint append_combos = 1;
-        for (uint i = 0; i < n_app; i++)
-            append_combos *= mask_desc[n_pre + i];
-        uint prepend_idx = mask_idx / append_combos;
-        uint append_idx = mask_idx % append_combos;
+        uint n_total_m = n_pre + n_app;
+
         if (n_pre > 0) {
+            uint append_combos = 1;
+            for (uint i = 0; i < n_app; i++)
+                append_combos *= mask_desc[n_pre + i];
+            uint prepend_idx = (uint)(mask_idx / append_combos);
+            uint append_idx = (uint)(mask_idx % append_combos);
             uint pidx = prepend_idx;
             for (int i = (int)n_pre - 1; i >= 0; i--) {
                 uint sz = mask_desc[i];
-                uint n_total_m = n_pre + n_app;
                 uchar ch = mask_desc[n_total_m + i * 256 + (pidx % sz)];
                 pidx /= sz;
                 M[i >> 2] = (M[i >> 2] & ~(0xFFu << ((i & 3) << 3)))
                            | ((uint)ch << ((i & 3) << 3));
             }
-        }
-        if (n_app > 0) {
+            if (n_app > 0) {
+                int total_len = M[14] >> 3;
+                int app_start = total_len - (int)n_app;
+                uint aidx = append_idx;
+                for (int i = (int)n_app - 1; i >= 0; i--) {
+                    int pos_idx = n_pre + i;
+                    uint sz = mask_desc[pos_idx];
+                    uchar ch = mask_desc[n_total_m + pos_idx * 256 + (aidx % sz)];
+                    aidx /= sz;
+                    int pos = app_start + i;
+                    M[pos >> 2] = (M[pos >> 2] & ~(0xFFu << ((pos & 3) << 3)))
+                                 | ((uint)ch << ((pos & 3) << 3));
+                }
+            }
+        } else {
+            /* Append-only (brute-force): host pre-decomposes mask_start into
+             * per-position base offsets. Kernel does fast uint32 local
+             * decomposition and adds to base with carry. */
             int total_len = M[14] >> 3;
             int app_start = total_len - (int)n_app;
-            uint aidx = append_idx;
+            uint local_idx = tid % params.num_masks;
+            uint aidx = local_idx;
+            uint carry = 0;
             for (int i = (int)n_app - 1; i >= 0; i--) {
-                int pos_idx = n_pre + i;
-                uint sz = mask_desc[pos_idx];
-                uint n_total_m = n_pre + n_app;
-                uchar ch = mask_desc[n_total_m + pos_idx * 256 + (aidx % sz)];
+                uint sz = mask_desc[i];
+                uint local_digit = aidx % sz;
                 aidx /= sz;
+                uint base_digit = (i < 8)
+                    ? (uint)((params.mask_base0 >> (i * 8)) & 0xFF)
+                    : (uint)((params.mask_base1 >> ((i - 8) * 8)) & 0xFF);
+                uint sum = base_digit + local_digit + carry;
+                carry = sum / sz;
+                uint final_digit = sum % sz;
+                uchar ch = mask_desc[n_total_m + i * 256 + final_digit];
                 int pos = app_start + i;
                 M[pos >> 2] = (M[pos >> 2] & ~(0xFFu << ((pos & 3) << 3)))
                              | ((uint)ch << ((pos & 3) << 3));
@@ -274,22 +268,20 @@ __kernel void sha224_unsalted_batch(
     };
     sha256_compress(state, M);
 
-    uint hx = bswap32(state[0]), hy = bswap32(state[1]);
-    uint hz = bswap32(state[2]), hw = bswap32(state[3]);
+    /* SHA224: 7 hash words */
+    uint h[7];
+    for (int i = 0; i < 7; i++) h[i] = bswap32(state[i]);
 
-    if (probe_compact(hx, hy, hz, hw, compact_fp, compact_idx,
+    if (probe_compact(h[0], h[1], h[2], h[3], compact_fp, compact_idx,
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
         uint slot = atomic_add(hit_count, 1u);
         if (slot < params.max_hits) {
-            uint base = slot * 6;
+            uint base = slot * 9;  /* 2 + 7 */
             hits[base]   = word_idx;
             hits[base+1] = mask_idx;
-            hits[base+2] = hx;
-            hits[base+3] = hy;
-            hits[base+4] = hz;
-            hits[base+5] = hw;
+            for (int i = 0; i < 7; i++) hits[base+2+i] = h[i];
             mem_fence(CLK_GLOBAL_MEM_FENCE);
         }
     }
@@ -300,7 +292,8 @@ __kernel void sha224_unsalted_batch(
  * For hashcat modes 21400, 30420. With -i N, iterates N times on
  * binary 32-byte output: sha256(sha256(...sha256(pass)...))
  * Second+ iterations always hash exactly 32 bytes (single block, fixed padding).
- * Hit stride: 6 (word_idx, mask_idx, hx, hy, hz, hw)
+ * Hit stride: 10 (word_idx, mask_idx, h0..h7) or
+ *             11 (word_idx, mask_idx, iter, h0..h7) when max_iter > 1
  */
 __kernel void sha256raw_unsalted_batch(
     __global const uint *words,
@@ -318,7 +311,7 @@ __kernel void sha256raw_unsalted_batch(
     OCLParams params = *params_buf;
     uint tid = get_global_id(0);
     uint word_idx = tid / params.num_masks;
-    uint mask_idx = params.mask_start + (tid % params.num_masks);
+    ulong mask_idx = params.mask_start + (tid % params.num_masks);
     if (word_idx >= params.num_words) return;
 
     __global const uint *src = words + word_idx * 16;
@@ -328,32 +321,56 @@ __kernel void sha256raw_unsalted_batch(
     uint n_pre = params.n_prepend;
     uint n_app = params.n_append;
     if (n_pre > 0 || n_app > 0) {
-        uint append_combos = 1;
-        for (uint i = 0; i < n_app; i++)
-            append_combos *= mask_desc[n_pre + i];
-        uint prepend_idx = mask_idx / append_combos;
-        uint append_idx = mask_idx % append_combos;
+        uint n_total_m = n_pre + n_app;
+
         if (n_pre > 0) {
+            uint append_combos = 1;
+            for (uint i = 0; i < n_app; i++)
+                append_combos *= mask_desc[n_pre + i];
+            uint prepend_idx = (uint)(mask_idx / append_combos);
+            uint append_idx = (uint)(mask_idx % append_combos);
             uint pidx = prepend_idx;
             for (int i = (int)n_pre - 1; i >= 0; i--) {
                 uint sz = mask_desc[i];
-                uint n_total_m = n_pre + n_app;
                 uchar ch = mask_desc[n_total_m + i * 256 + (pidx % sz)];
                 pidx /= sz;
                 M[i >> 2] = (M[i >> 2] & ~(0xFFu << ((i & 3) << 3)))
                            | ((uint)ch << ((i & 3) << 3));
             }
-        }
-        if (n_app > 0) {
+            if (n_app > 0) {
+                int total_len = M[14] >> 3;
+                int app_start = total_len - (int)n_app;
+                uint aidx = append_idx;
+                for (int i = (int)n_app - 1; i >= 0; i--) {
+                    int pos_idx = n_pre + i;
+                    uint sz = mask_desc[pos_idx];
+                    uchar ch = mask_desc[n_total_m + pos_idx * 256 + (aidx % sz)];
+                    aidx /= sz;
+                    int pos = app_start + i;
+                    M[pos >> 2] = (M[pos >> 2] & ~(0xFFu << ((pos & 3) << 3)))
+                                 | ((uint)ch << ((pos & 3) << 3));
+                }
+            }
+        } else {
+            /* Append-only (brute-force): host pre-decomposes mask_start into
+             * per-position base offsets. Kernel does fast uint32 local
+             * decomposition and adds to base with carry. */
             int total_len = M[14] >> 3;
             int app_start = total_len - (int)n_app;
-            uint aidx = append_idx;
+            uint local_idx = tid % params.num_masks;
+            uint aidx = local_idx;
+            uint carry = 0;
             for (int i = (int)n_app - 1; i >= 0; i--) {
-                int pos_idx = n_pre + i;
-                uint sz = mask_desc[pos_idx];
-                uint n_total_m = n_pre + n_app;
-                uchar ch = mask_desc[n_total_m + pos_idx * 256 + (aidx % sz)];
+                uint sz = mask_desc[i];
+                uint local_digit = aidx % sz;
                 aidx /= sz;
+                uint base_digit = (i < 8)
+                    ? (uint)((params.mask_base0 >> (i * 8)) & 0xFF)
+                    : (uint)((params.mask_base1 >> ((i - 8) * 8)) & 0xFF);
+                uint sum = base_digit + local_digit + carry;
+                carry = sum / sz;
+                uint final_digit = sum % sz;
+                uchar ch = mask_desc[n_total_m + i * 256 + final_digit];
                 int pos = app_start + i;
                 M[pos >> 2] = (M[pos >> 2] & ~(0xFFu << ((pos & 3) << 3)))
                              | ((uint)ch << ((pos & 3) << 3));
@@ -372,41 +389,43 @@ __kernel void sha256raw_unsalted_batch(
     };
     sha256_compress(state, M);
 
-    /* Binary iterations: sha256(32-byte binary output).
-     * 32 bytes + 0x80 + zeros + bit-length 256 at M[15] — single block. */
-    uint max_i = params.max_iter;
-    if (max_i < 1) max_i = 1;
-    for (uint iter = 1; iter <= max_i; iter++) {
-        /* Pack state (BE) into M[] — already big-endian from compress */
-        for (int i = 0; i < 8; i++) M[i] = state[i];
-        M[8] = 0x80000000u;  /* 0x80 in high byte (BE) */
-        for (int i = 9; i < 15; i++) M[i] = 0;
-        M[15] = 256;  /* 32 bytes * 8 bits */
+    /* Binary iteration: sha256(32-byte binary output).
+     * Set up fixed padding for 32-byte binary input once. */
+    M[8] = 0x80000000u;  /* 0x80 in high byte (BE) */
+    for (int i = 9; i < 15; i++) M[i] = 0;
+    M[15] = 256;  /* 32 bytes * 8 bits */
 
-        state[0] = 0x6a09e667u; state[1] = 0xbb67ae85u;
-        state[2] = 0x3c6ef372u; state[3] = 0xa54ff53au;
-        state[4] = 0x510e527fu; state[5] = 0x9b05688cu;
-        state[6] = 0x1f83d9abu; state[7] = 0x5be0cd19u;
-        sha256_compress(state, M);
+    uint max_iter = params.max_iter;
+    /* SHA256RAW: 8 hash words. hit_stride = 2 + 8 = 10, or 3 + 8 = 11 with iter */
+    uint hit_stride = (max_iter > 1) ? 11 : 10;
 
-        uint hx = bswap32(state[0]), hy = bswap32(state[1]);
-        uint hz = bswap32(state[2]), hw = bswap32(state[3]);
+    for (uint iter = 1; iter <= max_iter; iter++) {
 
-        if (probe_compact(hx, hy, hz, hw, compact_fp, compact_idx,
+        uint h[8];
+        for (int i = 0; i < 8; i++) h[i] = bswap32(state[i]);
+
+        if (probe_compact(h[0], h[1], h[2], h[3], compact_fp, compact_idx,
                           params.compact_mask, params.max_probe, params.hash_data_count,
                           hash_data_buf, hash_data_off,
                           overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
             uint slot = atomic_add(hit_count, 1u);
             if (slot < params.max_hits) {
-                uint base = slot * 6;
+                uint base = slot * hit_stride;
                 hits[base]   = word_idx;
                 hits[base+1] = mask_idx;
-                hits[base+2] = hx;
-                hits[base+3] = hy;
-                hits[base+4] = hz;
-                hits[base+5] = hw;
+                int offset = 2;
+                if (max_iter > 1) { hits[base+2] = iter; offset = 3; }
+                for (int i = 0; i < 8; i++) hits[base+offset+i] = h[i];
                 mem_fence(CLK_GLOBAL_MEM_FENCE);
             }
+        }
+        if (iter < max_iter) {
+            for (int i = 0; i < 8; i++) M[i] = state[i];
+            state[0] = 0x6a09e667u; state[1] = 0xbb67ae85u;
+            state[2] = 0x3c6ef372u; state[3] = 0xa54ff53au;
+            state[4] = 0x510e527fu; state[5] = 0x9b05688cu;
+            state[6] = 0x1f83d9abu; state[7] = 0x5be0cd19u;
+            sha256_compress(state, M);
         }
     }
 }

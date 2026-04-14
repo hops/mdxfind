@@ -1,5 +1,8 @@
 /*
  * $Log: mdxfind.h,v $
+ * Revision 1.14  2026/04/14 04:46:11  dlr
+ * GPU brute-force: timing probe, per-chunk dispatch, uint64 mask_start, base-offset decomposition, immediate hit processing, MD5SHA256SHA256 (e996)
+ *
  * Revision 1.13  2026/04/05 03:55:52  dlr
  * Include emmintrin.h under NOTINTEL guard, MAXCHUNK 50MB for Apple Silicon (not embedded ARM)
  *
@@ -70,6 +73,7 @@ struct job {
 #define JOBFLAG_IP 8
 #define JOBFLAG_PREPEND 16
 #define JOBFLAG_GPU 32
+#define JOBFLAG_BRUTEFORCE 64
 
 union HashU {
     unsigned char h[256];

@@ -55,6 +55,11 @@ int gpu_op_category(int op);
 /* Returns 1 if op has any GPU support */
 int is_gpu_op(int op);
 
+/* Returns the number of uint32 hash words this algorithm produces.
+ * Used to determine hit_stride, hash_words, and hexlen for GPU hits.
+ * hexlen = hash_words * 8; hit_stride = 2 + hash_words (+ 1 if iter). */
+int gpu_hash_words(int op);
+
 struct jobg {
     struct jobg *next;
     char        *filename;

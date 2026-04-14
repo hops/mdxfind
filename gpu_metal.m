@@ -14,7 +14,7 @@
 #include "gpujob.h"
 #include <string.h>
 #include <stdio.h>
-#include <mach-o/dyld.h>
+/* mach-o/dyld.h no longer needed — metallib is embedded, not loaded from file */
 
 /* ---- Metal per-family kernel sources (auto-generated from metal_*.metal) ---- */
 #include "gpu/metal_common_str.h"
@@ -237,16 +237,30 @@ typedef struct {
     uint32_t overflow_count;
     uint32_t max_iter;
     uint32_t num_masks;
-    uint32_t mask_start;
+    uint64_t mask_start;
     uint32_t n_prepend;
     uint32_t n_append;
     uint32_t iter_count;   /* PHPBB3: uniform iteration count for this dispatch group */
+    uint64_t mask_base0;   /* pre-decomposed mask_start: positions 0-7 packed as bytes */
+    uint64_t mask_base1;   /* positions 8-15 packed as bytes */
 } MetalParams;
 
 static int _max_iter = 1;
 static int _gpu_op = 0;  /* current op type for kernel selection */
 static int mtl_max_dispatch = 256 * 1024 * 1024;  /* max work items per dispatch (256M) */
+
+/* ---- Timing-based dispatch sizing ---- */
+#define TIMING_BUDGET_MIN_MS  200.0
+#define TIMING_BUDGET_MAX_MS  400.0
+#define TIMING_INITIAL_SIZE   65536   /* 64K work items */
+#define TIMING_WATCHDOG_MS    5000.0
+
+extern int gpu_op_family(int op);
+
+static uint32_t mtl_fam_max_items[FAM_COUNT];
+static int      mtl_fam_timed[FAM_COUNT];
 static MTLCompileOptions *mtl_compile_opts;  /* saved for deferred family compilation */
+static id<MTLLibrary> mtl_precompiled_lib;  /* precompiled metallib (nil = JIT fallback) */
 
 /* ---- Helper: wrap buffer with zero-copy if page-aligned, else copy ---- */
 static id<MTLBuffer> wrap_buffer(void *ptr, size_t size) {
@@ -286,18 +300,44 @@ int gpu_metal_init(void) {
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         opts.fastMathEnabled = YES;
 #pragma clang diagnostic pop
+        if (@available(macOS 13.0, *))
+            opts.optimizationLevel = MTLLibraryOptimizationLevelSize;
         mtl_compile_opts = opts;
 
         memset(mtl_fam_lib, 0, sizeof(mtl_fam_lib));
         memset(mtl_pipelines, 0, sizeof(mtl_pipelines));
         mtl_pipeline_iter = nil;
 
-        /* Compile md5salt family */
-        { NSString *src = [NSString stringWithFormat:@"%s%s",
-                           metal_common_str, mtl_family_source[FAM_MD5SALT]];
-          mtl_fam_lib[FAM_MD5SALT] = [mtl_device newLibraryWithSource:src
-                                                                   options:opts
-                                                                     error:&error];
+        /* Load embedded precompiled metallib — avoids JIT crashes on complex kernels.
+         * The metallib is compiled offline by gpu/build_metallib.sh and embedded
+         * as a byte array via xxd -i. Architecture-neutral AIR format. */
+        mtl_precompiled_lib = nil;
+        {
+#include "gpu/mdxfind_metallib.h"
+            dispatch_data_t mdata = dispatch_data_create(
+                gpu_mdxfind_metallib, gpu_mdxfind_metallib_len,
+                NULL, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+            NSError *lerr = nil;
+            mtl_precompiled_lib = [mtl_device newLibraryWithData:mdata error:&lerr];
+            if (mtl_precompiled_lib)
+                fprintf(stderr, "Metal GPU: loaded embedded metallib (%u bytes)\n",
+                        gpu_mdxfind_metallib_len);
+            else
+                fprintf(stderr, "Metal GPU: embedded metallib failed: %s, using JIT\n",
+                        lerr ? [[lerr localizedDescription] UTF8String] : "unknown");
+        }
+
+        /* Compile/load md5salt family (needed for probe/selftest) */
+        if (mtl_precompiled_lib) {
+            /* Use precompiled library for md5salt family */
+            mtl_fam_lib[FAM_MD5SALT] = mtl_precompiled_lib;
+        } else {
+            /* JIT fallback */
+            NSString *src = [NSString stringWithFormat:@"%s%s",
+                               metal_common_str, mtl_family_source[FAM_MD5SALT]];
+            mtl_fam_lib[FAM_MD5SALT] = [mtl_device newLibraryWithSource:src
+                                                                 options:opts
+                                                                   error:&error];
         }
         if (!mtl_fam_lib[FAM_MD5SALT]) {
             fprintf(stderr, "Metal: md5salt family failed to compile\n");
@@ -387,11 +427,46 @@ void gpu_metal_compile_families(unsigned int fam_mask) {
     if (!mtl_ready || !mtl_compile_opts) return;
     @autoreleasepool {
         NSError *error = nil;
+
         for (int f = 0; f < FAM_COUNT; f++) {
             if (mtl_fam_lib[f]) continue;  /* already compiled */
             if (!(fam_mask & (1u << f))) continue;  /* not requested */
-            NSString *src = [NSString stringWithFormat:@"%s%s",
-                             metal_common_str, mtl_family_source[f]];
+
+            /* Try precompiled metallib first — kernel lookup by name */
+            if (mtl_precompiled_lib) {
+                int found = 0;
+                for (int k = 0; metal_kernel_map[k].name; k++) {
+                    if (metal_kernel_map[k].family != f) continue;
+                    NSString *fname = [NSString stringWithUTF8String:metal_kernel_map[k].name];
+                    id<MTLFunction> fn = [mtl_precompiled_lib newFunctionWithName:fname];
+                    if (!fn) continue;
+                    id<MTLComputePipelineState> ps = [mtl_device newComputePipelineStateWithFunction:fn error:&error];
+                    if (!ps) { fprintf(stderr, "Metal: pipeline failed for '%s': %s\n", metal_kernel_map[k].name, error ? [[error localizedDescription] UTF8String] : "unknown"); continue; }
+                    if (k == MTL_KERN_ITER_IDX)
+                        mtl_pipeline_iter = ps;
+                    for (int j = 0; metal_kernel_map[k].ops[j] >= 0; j++)
+                        mtl_pipelines[metal_kernel_map[k].ops[j]] = ps;
+                    found++;
+                }
+                if (found > 0) {
+                    mtl_fam_lib[f] = mtl_precompiled_lib;
+                    continue;  /* family fully loaded from metallib */
+                }
+                /* No kernels found in metallib — fall through to JIT */
+                fprintf(stderr, "Metal: family %d not in metallib, trying JIT\n", f);
+            }
+
+            /* JIT fallback: compile from embedded source strings */
+            /* SHA512 family is self-contained (includes own K512, compress, etc.)
+             * to reduce combined source size below Metal JIT memory limits. */
+            NSString *src;
+            if (f == FAM_SHA512UNSALTED || f == FAM_HMAC_SHA512) {
+                src = [NSString stringWithUTF8String:mtl_family_source[f]];
+                fprintf(stderr, "Metal: family %d self-contained (%lu bytes)\n", f, (unsigned long)[src length]);
+            } else {
+                src = [NSString stringWithFormat:@"%s%s",
+                         metal_common_str, mtl_family_source[f]];
+            }
             mtl_fam_lib[f] = [mtl_device newLibraryWithSource:src
                                                        options:mtl_compile_opts
                                                          error:&error];
@@ -405,9 +480,9 @@ void gpu_metal_compile_families(unsigned int fam_mask) {
                 if (metal_kernel_map[k].family != f) continue;
                 NSString *fname = [NSString stringWithUTF8String:metal_kernel_map[k].name];
                 id<MTLFunction> fn = [mtl_fam_lib[f] newFunctionWithName:fname];
-                if (!fn) continue;
+                if (!fn) { fprintf(stderr, "Metal: kernel '%s' not found in family %d\n", metal_kernel_map[k].name, f); continue; }
                 id<MTLComputePipelineState> ps = [mtl_device newComputePipelineStateWithFunction:fn error:&error];
-                if (!ps) continue;
+                if (!ps) { fprintf(stderr, "Metal: pipeline failed for '%s': %s\n", metal_kernel_map[k].name, error ? [[error localizedDescription] UTF8String] : "unknown"); continue; }
                 if (k == MTL_KERN_ITER_IDX)
                     mtl_pipeline_iter = ps;
                 for (int j = 0; metal_kernel_map[k].ops[j] >= 0; j++)
@@ -495,7 +570,7 @@ int gpu_metal_set_salts(
         /* Size hit buffer for chunk dispatch — 5 uint32s per hit */
         #define GPU_MAX_HITS 32768
         _max_hits = GPU_MAX_HITS;
-        buf_dispatch_hits = [mtl_device newBufferWithLength:_max_hits * 7 * sizeof(uint32_t)
+        buf_dispatch_hits = [mtl_device newBufferWithLength:_max_hits * 19 * sizeof(uint32_t)
                                                     options:MTLResourceStorageModeShared];
         *(uint32_t *)[buf_dispatch_hit_count contents] = 0;
 
@@ -663,6 +738,15 @@ void gpu_metal_set_op(int op) {
     _gpu_op = op;
 }
 
+static uint64_t _mask_resume = 0;
+static uint32_t _salt_resume = 0;
+static uint64_t _last_mask_start = 0;  /* mask_start of the chunk that returned hits */
+
+void gpu_metal_set_mask_resume(uint32_t start) { _mask_resume = start; }
+void gpu_metal_set_salt_resume(uint32_t start) { _salt_resume = start; }
+int gpu_metal_has_resume(void) { return _mask_resume > 0 || _salt_resume > 0; }
+uint64_t gpu_metal_last_mask_start(void) { return _last_mask_start; }
+
 uint32_t *gpu_metal_dispatch_batch(
     const char *hexhashes,
     const uint16_t *hexlens,
@@ -679,13 +763,13 @@ uint32_t *gpu_metal_dispatch_batch(
             #define GPU_MAX_HITS 32768
             _max_hits = GPU_MAX_HITS;
             if (!buf_dispatch_hits)
-                buf_dispatch_hits = [mtl_device newBufferWithLength:_max_hits * 11 * sizeof(uint32_t)
+                buf_dispatch_hits = [mtl_device newBufferWithLength:_max_hits * 19 * sizeof(uint32_t)
                                                             options:MTLResourceStorageModeShared];
             if (!buf_dispatch_hit_count)
                 buf_dispatch_hit_count = [mtl_device newBufferWithLength:sizeof(uint32_t)
                                                                  options:MTLResourceStorageModeShared];
             if (!buf_dispatch_hexhashes)
-                buf_dispatch_hexhashes = [mtl_device newBufferWithLength:4096 * 256
+                buf_dispatch_hexhashes = [mtl_device newBufferWithLength:4096 * 712
                                                                  options:MTLResourceStorageModeShared];
             if (!buf_dispatch_hexlens)
                 buf_dispatch_hexlens = [mtl_device newBufferWithLength:4096 * sizeof(uint16_t)
@@ -712,9 +796,25 @@ uint32_t *gpu_metal_dispatch_batch(
          * Unsalted pre-padded: num_words can exceed GPUBATCH_MAX (up to 4096),
          * use actual word_stride from caller (64/128/etc).
          * Salted types: always 256-byte stride, max GPUBATCH_MAX words. */
-        int word_stride = is_unsalted ? 64 : 256;  /* TODO: pass actual stride */
-        if (is_unsalted && _gpu_op == JOB_SHA512) word_stride = 128;
-        if (is_unsalted && _gpu_op == JOB_SHA384) word_stride = 128;
+        int word_stride;
+        if (!is_unsalted) {
+            word_stride = 256;
+        } else if (_gpu_op == JOB_SHA512 || _gpu_op == JOB_SHA384 ||
+                   _gpu_op == JOB_SHA512RAW || _gpu_op == JOB_SHA384RAW) {
+            word_stride = 128;
+        } else if (_gpu_op == JOB_MD6256) {
+            word_stride = 712;
+        } else if (_gpu_op == JOB_KECCAK224 || _gpu_op == JOB_SHA3_224) {
+            word_stride = 152;
+        } else if (_gpu_op == JOB_KECCAK256 || _gpu_op == JOB_SHA3_256) {
+            word_stride = 144;
+        } else if (_gpu_op == JOB_KECCAK384 || _gpu_op == JOB_SHA3_384) {
+            word_stride = 112;
+        } else if (_gpu_op == JOB_KECCAK512 || _gpu_op == JOB_SHA3_512) {
+            word_stride = 80;
+        } else {
+            word_stride = 64;
+        }
         size_t words_size = (size_t)num_words * word_stride;
         memcpy([buf_dispatch_hexhashes contents], hexhashes, words_size);
         memcpy([buf_dispatch_hexlens contents], hexlens, num_words * sizeof(uint16_t));
@@ -733,95 +833,269 @@ uint32_t *gpu_metal_dispatch_batch(
         params.iter_count = _iter_count;
         { extern int gpu_mask_n_prepend, gpu_mask_n_append;
           extern uint64_t gpu_mask_total;
-          params.num_masks = is_unsalted ? (gpu_mask_total > 0 ? (uint32_t)gpu_mask_total : 1) : 0;
+          params.num_masks = is_unsalted ? (gpu_mask_total > 0 ? (gpu_mask_total < 0xFFFFFFFF ? (uint32_t)gpu_mask_total : 1) : 1) : 0;
           params.mask_start = 0;
           params.n_prepend = gpu_mask_n_prepend;
           params.n_append = gpu_mask_n_append;
         }
 
-        /* Salt chunking — avoid overwhelming the GPU with huge dispatches */
+        /* Determine mask/salt chunking parameters */
+        extern uint64_t gpu_mask_total;
+        int is_mask = (is_unsalted && gpu_mask_total > 1);
         int total_salts = _salts_count;
-        int salt_chunk = total_salts;
-        if (mtl_max_dispatch > 0 && num_words > 0 && total_salts > 0) {
-            salt_chunk = mtl_max_dispatch / num_words;
-            if (salt_chunk < 1024) salt_chunk = 1024;
-            if (salt_chunk > total_salts) salt_chunk = total_salts;
-        }
-        int num_chunks = is_unsalted ? 1 : (total_salts + salt_chunk - 1) / salt_chunk;
 
-        /* Zero hit counter */
-        *(uint32_t *)[buf_dispatch_hit_count contents] = 0;
+        /* --- Timing-based dispatch sizing probe --- */
+        int fam = gpu_op_family(_gpu_op);
+        int is_bcrypt = (fam == FAM_BCRYPT);
 
-        /* Encode and dispatch — use iter kernel when max_iter > 1 */
-        id<MTLCommandBuffer> cmdbuf = [mtl_queue commandBuffer];
-        id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
-
+        /* Look up pipeline early — needed for timing probe */
         id<MTLComputePipelineState> pipeline =
             (!is_unsalted && _max_iter > 1 && mtl_pipeline_iter) ? mtl_pipeline_iter :
             (_gpu_op >= 0 && _gpu_op < JOB_DONE && mtl_pipelines[_gpu_op]) ? mtl_pipelines[_gpu_op] : nil;
         if (!pipeline) {
             fprintf(stderr, "Metal: no pipeline for op %d\n", _gpu_op);
-            [enc endEncoding]; [cmdbuf commit]; [cmdbuf waitUntilCompleted]; return NULL;
+            return NULL;
         }
-        [enc setComputePipelineState:pipeline];
-        [enc setBuffer:buf_dispatch_hexhashes offset:0 atIndex:0];
-        [enc setBuffer:buf_dispatch_hexlens  offset:0 atIndex:1];
-        [enc setBuffer:buf_dispatch_hexlens  offset:0 atIndex:2]; /* unused slot */
-        [enc setBuffer:(is_unsalted ? (buf_mask_desc ? buf_mask_desc : buf_dummy) : buf_salt_data)
-                                         offset:0 atIndex:3];
-        [enc setBuffer:buf_salt_off      offset:0 atIndex:4];
-        [enc setBuffer:buf_salt_len      offset:0 atIndex:5];
-        [enc setBuffer:buf_compact_fp    offset:0 atIndex:6];
-        [enc setBuffer:buf_compact_idx   offset:0 atIndex:7];
-        [enc setBytes:&params length:sizeof(params) atIndex:8];
-        [enc setBuffer:buf_hash_data     offset:0 atIndex:9];
-        [enc setBuffer:buf_hash_data_off offset:0 atIndex:10];
-        [enc setBuffer:buf_hash_data_len offset:0 atIndex:11];
-        [enc setBuffer:buf_dispatch_hits offset:0 atIndex:12];
-        [enc setBuffer:buf_dispatch_hit_count offset:0 atIndex:13];
-        /* Overflow buffers — use persistent dummy if no overflow */
-        [enc setBuffer:(buf_overflow_keys    ? buf_overflow_keys    : buf_dummy) offset:0 atIndex:14];
-        [enc setBuffer:(buf_overflow_hashes  ? buf_overflow_hashes  : buf_dummy) offset:0 atIndex:15];
-        [enc setBuffer:(buf_overflow_offsets ? buf_overflow_offsets : buf_dummy) offset:0 atIndex:16];
-        [enc setBuffer:(buf_overflow_lengths ? buf_overflow_lengths : buf_dummy) offset:0 atIndex:17];
 
         NSUInteger tpg = [pipeline maxTotalThreadsPerThreadgroup];
         if (tpg > 256) tpg = 256;
         if (_gpu_op == JOB_BCRYPT && tpg > 8) tpg = 8;
         if (_gpu_op == JOB_SHA512CRYPT || _gpu_op == JOB_SHA512CRYPTMD5) {
-            if (tpg > 32) tpg = 32;  /* SHA512CRYPT uses heavy stack; limit occupancy */
+            if (tpg > 32) tpg = 32;
         }
         MTLSize groupSize = MTLSizeMake(tpg, 1, 1);
 
-        /* Salt chunking: encode chunks into command buffer using setBytes for params */
+        if (fam >= 0 && fam < FAM_COUNT && !mtl_fam_timed[fam] && (is_mask || !is_unsalted)) {
+            uint32_t probe_size = is_bcrypt ? 1 : TIMING_INITIAL_SIZE;
+            uint32_t best_size = probe_size;
+            double best_ms = 0;
+
+            for (int probe = 0; probe < 20; probe++) {
+                *(uint32_t *)[buf_dispatch_hit_count contents] = 0;
+
+                MetalParams probe_params = params;
+                if (is_mask) {
+                    uint32_t pm = probe_size / (num_words > 0 ? num_words : 1);
+                    if (pm < 1) pm = 1;
+                    if ((uint64_t)pm > gpu_mask_total) pm = (gpu_mask_total < 0xFFFFFFFF) ? (uint32_t)gpu_mask_total : 0xFFFFFFFF;
+                    probe_params.num_masks = pm;
+                    probe_params.mask_start = 0;
+                } else {
+                    int ps = (int)(probe_size / (num_words > 0 ? num_words : 1));
+                    if (ps < 1) ps = 1;
+                    if (ps > total_salts) ps = total_salts;
+                    probe_params.num_salts = ps;
+                    probe_params.salt_start = 0;
+                }
+
+                uint64_t probe_threads = is_mask
+                    ? (uint64_t)num_words * probe_params.num_masks
+                    : (uint64_t)num_words * probe_params.num_salts;
+
+                id<MTLCommandBuffer> pcmd = [mtl_queue commandBuffer];
+                id<MTLComputeCommandEncoder> penc = [pcmd computeCommandEncoder];
+                [penc setComputePipelineState:pipeline];
+                [penc setBuffer:buf_dispatch_hexhashes offset:0 atIndex:0];
+                [penc setBuffer:buf_dispatch_hexlens  offset:0 atIndex:1];
+                [penc setBuffer:buf_dispatch_hexlens  offset:0 atIndex:2];
+                [penc setBuffer:(is_unsalted ? (buf_mask_desc ? buf_mask_desc : buf_dummy) : buf_salt_data)
+                                                 offset:0 atIndex:3];
+                [penc setBuffer:buf_salt_off      offset:0 atIndex:4];
+                [penc setBuffer:buf_salt_len      offset:0 atIndex:5];
+                [penc setBuffer:buf_compact_fp    offset:0 atIndex:6];
+                [penc setBuffer:buf_compact_idx   offset:0 atIndex:7];
+                [penc setBytes:&probe_params length:sizeof(probe_params) atIndex:8];
+                [penc setBuffer:buf_hash_data     offset:0 atIndex:9];
+                [penc setBuffer:buf_hash_data_off offset:0 atIndex:10];
+                [penc setBuffer:buf_hash_data_len offset:0 atIndex:11];
+                [penc setBuffer:buf_dispatch_hits offset:0 atIndex:12];
+                [penc setBuffer:buf_dispatch_hit_count offset:0 atIndex:13];
+                [penc setBuffer:(buf_overflow_keys    ? buf_overflow_keys    : buf_dummy) offset:0 atIndex:14];
+                [penc setBuffer:(buf_overflow_hashes  ? buf_overflow_hashes  : buf_dummy) offset:0 atIndex:15];
+                [penc setBuffer:(buf_overflow_offsets ? buf_overflow_offsets : buf_dummy) offset:0 atIndex:16];
+                [penc setBuffer:(buf_overflow_lengths ? buf_overflow_lengths : buf_dummy) offset:0 atIndex:17];
+
+                MTLSize probeGrid = MTLSizeMake(probe_threads, 1, 1);
+                [penc dispatchThreads:probeGrid threadsPerThreadgroup:groupSize];
+                [penc endEncoding];
+
+                NSDate *pstart = [NSDate date];
+                [pcmd commit];
+                [pcmd waitUntilCompleted];
+                double pms = -[pstart timeIntervalSinceNow] * 1000.0;
+
+                best_size = probe_size;
+                best_ms = pms;
+
+                if (is_bcrypt) {
+                    if (pms > 0) {
+                        double per_item = pms;
+                        uint32_t target = (uint32_t)(TIMING_BUDGET_MIN_MS / per_item);
+                        if (target < 1) target = 1;
+                        best_size = target;
+                    }
+                    break;
+                }
+
+                if (pms >= TIMING_BUDGET_MIN_MS && pms <= TIMING_BUDGET_MAX_MS)
+                    break;
+                if (pms > TIMING_BUDGET_MAX_MS) {
+                    best_size = probe_size / 2;
+                    if (best_size < TIMING_INITIAL_SIZE) best_size = TIMING_INITIAL_SIZE;
+                    break;
+                }
+                if (pms >= TIMING_WATCHDOG_MS)
+                    break;
+
+                uint64_t next = (uint64_t)probe_size * 2;
+                if (next > 0x7FFFFFFF) next = 0x7FFFFFFF;
+                probe_size = (uint32_t)next;
+            }
+
+            mtl_fam_max_items[fam] = best_size;
+            mtl_fam_timed[fam] = 1;
+            fprintf(stderr, "Metal GPU: timed family %d: max_items=%u (%.1fms)\n",
+                    fam, best_size, best_ms);
+        }
+
+        /* Use timed chunk size if available, otherwise fall back to defaults */
+        uint32_t timed_max = (fam >= 0 && fam < FAM_COUNT && mtl_fam_timed[fam])
+            ? mtl_fam_max_items[fam] : 0;
+
+        int salt_chunk = total_salts;
+        if (timed_max > 0 && !is_unsalted && num_words > 0) {
+            salt_chunk = (int)(timed_max / num_words);
+            if (salt_chunk < 1024) salt_chunk = 1024;
+            if (salt_chunk > total_salts) salt_chunk = total_salts;
+        } else if (mtl_max_dispatch > 0 && num_words > 0 && total_salts > 0) {
+            salt_chunk = mtl_max_dispatch / num_words;
+            if (salt_chunk < 1024) salt_chunk = 1024;
+            if (salt_chunk > total_salts) salt_chunk = total_salts;
+        }
+
+#define MASK_CHUNK_DEFAULT 4194304  /* 4M mask combinations per dispatch (fallback) */
+        /* Apply resume point from previous hit-interrupted dispatch */
+        uint64_t mask_start_base = is_mask ? _mask_resume : 0;
+        _mask_resume = 0;  /* consumed */
+        int salt_start_base = !is_unsalted ? (int)_salt_resume : 0;
+        _salt_resume = 0;
+
+        uint64_t mask_total = is_mask ? (gpu_mask_total - mask_start_base) : 0;
+        uint64_t mask_chunk;
+        if (is_mask) {
+            if (timed_max > 0 && num_words > 0)
+                mask_chunk = timed_max / num_words;
+            else
+                mask_chunk = MASK_CHUNK_DEFAULT;
+            if (mask_chunk < 1) mask_chunk = 1;
+            if (mask_chunk > mask_total) mask_chunk = mask_total;
+        } else {
+            mask_chunk = 0;
+        }
+
+        int num_chunks;
+        if (is_mask)
+            num_chunks = (int)((mask_total + mask_chunk - 1) / mask_chunk);
+        else if (!is_unsalted)
+            num_chunks = (total_salts + salt_chunk - 1) / salt_chunk;
+        else
+            num_chunks = 1;
+
+        /* Chunk loop: each chunk is committed separately.
+         * Zero hit counter before each chunk. If any hits are found,
+         * return immediately so the gpujob can process them.
+         * The caller uses mask_resume/salt_resume to continue. */
+        extern unsigned long long Tothash;
+        extern uint8_t gpu_mask_sizes[];
+        extern int gpu_mask_n_prepend, gpu_mask_n_append;
+
         for (int chunk = 0; chunk < num_chunks; chunk++) {
-            if (num_chunks > 1) {
+            if (is_mask) {
+                params.mask_start = mask_start_base + (uint64_t)chunk * mask_chunk;
+                { uint64_t remaining = mask_total - (uint64_t)chunk * mask_chunk;
+                  if (remaining > mask_chunk) remaining = mask_chunk;
+                  params.num_masks = (uint32_t)remaining;
+                }
+                /* Pre-decompose mask_start into per-position base offsets.
+                 * The kernel does fast uint32 local decomposition and adds
+                 * to these bases with carry, avoiding 64-bit GPU division. */
+                { uint64_t ms = params.mask_start;
+                  uint64_t b0 = 0, b1 = 0;
+                  int ntot = gpu_mask_n_prepend + gpu_mask_n_append;
+                  for (int i = ntot - 1; i >= 0; i--) {
+                    uint8_t sz = gpu_mask_sizes[i];
+                    uint8_t digit = (uint8_t)(ms % sz);
+                    ms /= sz;
+                    if (i < 8) b0 |= (uint64_t)digit << (i * 8);
+                    else       b1 |= (uint64_t)digit << ((i - 8) * 8);
+                  }
+                  params.mask_base0 = b0;
+                  params.mask_base1 = b1;
+                }
+            } else if (num_chunks > 1) {
                 params.salt_start = chunk * salt_chunk;
                 params.num_salts = total_salts - params.salt_start;
                 if ((int)params.num_salts > salt_chunk) params.num_salts = salt_chunk;
-                /* Use setBytes to inline params — avoids modifying shared buffer mid-encode */
-                [enc setBytes:&params length:sizeof(params) atIndex:8];
             }
 
-            uint64_t chunk_threads = is_unsalted
+            uint64_t chunk_threads = is_mask
                 ? (uint64_t)num_words * params.num_masks
+                : is_unsalted
+                ? (uint64_t)num_words * (params.num_masks > 0 ? params.num_masks : 1)
                 : (uint64_t)num_words * params.num_salts;
-            /* debug removed */
+
+            /* Zero hit counter before each chunk */
+            *(uint32_t *)[buf_dispatch_hit_count contents] = 0;
+
+            /* Encode, commit, and wait */
+            id<MTLCommandBuffer> ccmdbuf = [mtl_queue commandBuffer];
+            id<MTLComputeCommandEncoder> cenc = [ccmdbuf computeCommandEncoder];
+            [cenc setComputePipelineState:pipeline];
+            [cenc setBuffer:buf_dispatch_hexhashes offset:0 atIndex:0];
+            [cenc setBuffer:buf_dispatch_hexlens  offset:0 atIndex:1];
+            [cenc setBuffer:buf_dispatch_hexlens  offset:0 atIndex:2];
+            [cenc setBuffer:(is_unsalted ? (buf_mask_desc ? buf_mask_desc : buf_dummy) : buf_salt_data)
+                                                     offset:0 atIndex:3];
+            [cenc setBuffer:buf_salt_off      offset:0 atIndex:4];
+            [cenc setBuffer:buf_salt_len      offset:0 atIndex:5];
+            [cenc setBuffer:buf_compact_fp    offset:0 atIndex:6];
+            [cenc setBuffer:buf_compact_idx   offset:0 atIndex:7];
+            [cenc setBytes:&params length:sizeof(params) atIndex:8];
+            [cenc setBuffer:buf_hash_data     offset:0 atIndex:9];
+            [cenc setBuffer:buf_hash_data_off offset:0 atIndex:10];
+            [cenc setBuffer:buf_hash_data_len offset:0 atIndex:11];
+            [cenc setBuffer:buf_dispatch_hits offset:0 atIndex:12];
+            [cenc setBuffer:buf_dispatch_hit_count offset:0 atIndex:13];
+            [cenc setBuffer:(buf_overflow_keys    ? buf_overflow_keys    : buf_dummy) offset:0 atIndex:14];
+            [cenc setBuffer:(buf_overflow_hashes  ? buf_overflow_hashes  : buf_dummy) offset:0 atIndex:15];
+            [cenc setBuffer:(buf_overflow_offsets ? buf_overflow_offsets : buf_dummy) offset:0 atIndex:16];
+            [cenc setBuffer:(buf_overflow_lengths ? buf_overflow_lengths : buf_dummy) offset:0 atIndex:17];
             MTLSize gridSize = MTLSizeMake(chunk_threads, 1, 1);
-            [enc dispatchThreads:gridSize threadsPerThreadgroup:groupSize];
+            [cenc dispatchThreads:gridSize threadsPerThreadgroup:groupSize];
+            [cenc endEncoding];
+            [ccmdbuf commit];
+            [ccmdbuf waitUntilCompleted];
+
+            /* Update Tothash for progress tracking */
+            __sync_fetch_and_add(&Tothash, chunk_threads);
+
+            /* Check for hits — return immediately if any found */
+            uint32_t chunk_hits = *(uint32_t *)[buf_dispatch_hit_count contents];
+            if (chunk_hits > 0) {
+                *nhits_out = (int)chunk_hits;
+                _last_mask_start = params.mask_start;  /* for gpujob hit reconstruction */
+                /* Set resume point for next call: mask or salt position after this chunk */
+                if (is_mask) {
+                    uint64_t next_start = mask_start_base + (uint64_t)(chunk + 1) * mask_chunk;
+                    if (next_start < gpu_mask_total)
+                        _mask_resume = next_start;
+                }
+                return (uint32_t *)[buf_dispatch_hits contents];
+            }
         }
 
-        [enc endEncoding];
-        [cmdbuf commit];
-        [cmdbuf waitUntilCompleted];
-
-        /* Read back — return raw count and pointer */
-        uint32_t raw_nhits = *(uint32_t *)[buf_dispatch_hit_count contents];
-        *nhits_out = (int)raw_nhits;
-        /* readback */
-
-        cmdbuf = nil; enc = nil;
-
+        /* No hits found across all chunks */
+        *nhits_out = 0;
         return (uint32_t *)[buf_dispatch_hits contents];
     }
 }

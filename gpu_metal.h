@@ -155,6 +155,11 @@ void gpu_metal_set_op(int op);
  * 0 = use per-salt decode (default). Non-zero = all threads use this count. */
 void gpu_metal_set_iter_count(int count);
 
+/* Mask/salt resume for chunked dispatch with immediate hit processing */
+void gpu_metal_set_mask_resume(uint32_t start);
+void gpu_metal_set_salt_resume(uint32_t start);
+int gpu_metal_has_resume(void);
+
 /* ---- Double-buffer slot API ---- */
 
 /* Initialize double-buffer dispatch slots. Call once from gpujob_init.

@@ -53,6 +53,10 @@ struct gpu_device {
 
     /* Mask mode */
     cl_mem bgpu_mask_desc;  /* mask descriptor: charset IDs per position */
+
+    /* Per-family timing-based dispatch sizing */
+    uint32_t fam_max_items[FAM_COUNT];  /* timed max work items per dispatch */
+    int      fam_timed[FAM_COUNT];      /* 1 = probed for this family */
 };
 
 static struct gpu_device gpu_devs[MAX_GPU_DEVICES];
@@ -65,8 +69,16 @@ static uint32_t _hash_data_count = 0;
 static int _overflow_count = 0;
 static int _max_iter = 1;
 static int _gpu_op = 0;
-static uint32_t _mask_resume = 0;  /* mask_start override for overflow retry */
+static uint64_t _mask_resume = 0;  /* mask_start override for overflow retry */
 static uint32_t _salt_resume = 0;  /* salt_start override for overflow retry */
+
+/* ---- Timing-based dispatch sizing constants ---- */
+#define TIMING_BUDGET_MIN_MS  200.0
+#define TIMING_BUDGET_MAX_MS  400.0
+#define TIMING_INITIAL_SIZE   65536   /* 64K work items */
+#define TIMING_WATCHDOG_MS    5000.0  /* never risk exceeding this */
+
+extern int gpu_op_family(int op);
 
 /* ---- Per-kernel autotune state ---- */
 #define TUNE_CANDIDATES 4
@@ -170,9 +182,11 @@ typedef struct {
     uint32_t overflow_count;
     uint32_t max_iter;
     uint32_t num_masks;
-    uint32_t mask_start;
+    uint64_t mask_start;
     uint32_t n_prepend;
     uint32_t n_append;
+    uint64_t mask_base0;   /* pre-decomposed mask_start: positions 0-7 packed as bytes */
+    uint64_t mask_base1;   /* positions 8-15 packed as bytes */
 } OCLParams;
 
 /* ---- Load kernel source from file ---- */
@@ -480,10 +494,10 @@ static int init_device(int di, cl_device_id dev_id) {
 
     /* Per-device dispatch buffers */
     d->b_hits = clCreateBuffer(d->ctx, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
-                               GPU_MAX_HITS * 11 * sizeof(uint32_t), NULL, &err);
+                               GPU_MAX_HITS * 19 * sizeof(uint32_t), NULL, &err);
     d->b_hit_count = clCreateBuffer(d->ctx, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
                                      sizeof(uint32_t), NULL, &err);
-    d->h_hits = (uint32_t *)malloc_lock(GPU_MAX_HITS * 11 * sizeof(uint32_t),"device_init");
+    d->h_hits = (uint32_t *)malloc_lock(GPU_MAX_HITS * 19 * sizeof(uint32_t),"device_init");
     d->b_params = dev_buf(d, sizeof(OCLParams), CL_MEM_READ_ONLY);
 
     /* Dummy overflow buffers (replaced when overflow is loaded) */
@@ -946,6 +960,9 @@ int gpu_opencl_set_overflow(int dev_idx,
 
 void gpu_opencl_set_max_iter(int max_iter) { _max_iter = (max_iter < 1) ? 1 : max_iter; }
 void gpu_opencl_set_mask_resume(uint32_t start) { _mask_resume = start; }
+int gpu_opencl_has_resume(void) { return _mask_resume > 0 || _salt_resume > 0; }
+static uint64_t _last_mask_start = 0;
+uint64_t gpu_opencl_last_mask_start(void) { return _last_mask_start; }
 void gpu_opencl_set_salt_resume(uint32_t start) { _salt_resume = start; }
 void gpu_opencl_set_op(int op) { _gpu_op = op; }
 
@@ -1110,16 +1127,124 @@ uint32_t *gpu_opencl_dispatch_batch(int dev_idx,
     total_salts = is_salted ? (total_salts - salt_start_base) : 0;
     _salt_resume = 0;  /* consumed — reset for next dispatch */
 
+    /* --- Timing-based dispatch sizing probe --- */
+    int fam = gpu_op_family(op);
+    int is_bcrypt = (fam == FAM_BCRYPT);
+    if (fam >= 0 && fam < FAM_COUNT && !d->fam_timed[fam] && (is_mask || is_salted)) {
+        /* First dispatch for this family: probe at increasing sizes to find
+         * the chunk size that fills 200-400ms of GPU time. */
+        uint32_t probe_size = is_bcrypt ? 1 : TIMING_INITIAL_SIZE;
+        uint32_t best_size = probe_size;
+        double best_ms = 0;
+
+        for (int probe = 0; probe < 20; probe++) {
+            /* Set up a probe dispatch */
+            uint32_t zero_hit = 0;
+            if (p_clEnqueueFillBuffer)
+                clEnqueueFillBuffer(d->queue, d->b_hit_count, &zero_hit, sizeof(zero_hit), 0, sizeof(zero_hit), 0, NULL, NULL);
+            else
+                clEnqueueWriteBuffer(d->queue, d->b_hit_count, CL_TRUE, 0, sizeof(zero_hit), &zero_hit, 0, NULL, NULL);
+
+            OCLParams probe_params = params;
+            if (is_mask) {
+                uint32_t pm = probe_size / (num_words > 0 ? num_words : 1);
+                if (pm < 1) pm = 1;
+                if ((uint64_t)pm > gpu_mask_total) pm = (gpu_mask_total < 0xFFFFFFFF) ? (uint32_t)gpu_mask_total : 0xFFFFFFFF;
+                probe_params.num_masks = pm;
+                probe_params.mask_start = 0;
+            } else if (is_salted) {
+                int ps = (int)(probe_size / (num_words > 0 ? num_words : 1));
+                if (ps < 1) ps = 1;
+                if (ps > d->salts_count) ps = d->salts_count;
+                probe_params.num_salts = ps;
+                probe_params.salt_start = salt_start_base;
+            }
+            clEnqueueWriteBuffer(d->queue, d->b_params, CL_TRUE, 0, sizeof(probe_params), &probe_params, 0, NULL, NULL);
+
+            size_t probe_global = is_mask
+                ? (size_t)num_words * probe_params.num_masks
+                : (size_t)num_words * probe_params.num_salts;
+            probe_global = ((probe_global + local - 1) / local) * local;
+
+            struct timespec pt0, pt1;
+            clock_gettime(CLOCK_MONOTONIC, &pt0);
+            cl_int perr = clEnqueueNDRangeKernel(d->queue, kern, 1, NULL, &probe_global, &local, 0, NULL, NULL);
+            if (perr != CL_SUCCESS) break;
+            clFinish(d->queue);
+            clock_gettime(CLOCK_MONOTONIC, &pt1);
+            double pms = (pt1.tv_sec - pt0.tv_sec) * 1e3 + (pt1.tv_nsec - pt0.tv_nsec) / 1e6;
+
+            best_size = probe_size;
+            best_ms = pms;
+
+            if (is_bcrypt) {
+                /* bcrypt: extrapolate from single-item timing */
+                if (pms > 0) {
+                    double per_item = pms;
+                    uint32_t target = (uint32_t)(TIMING_BUDGET_MIN_MS / per_item);
+                    if (target < 1) target = 1;
+                    best_size = target;
+                }
+                break;
+            }
+
+            if (pms >= TIMING_BUDGET_MIN_MS && pms <= TIMING_BUDGET_MAX_MS)
+                break;  /* in range */
+            if (pms > TIMING_BUDGET_MAX_MS) {
+                /* overshoot — halve and stop */
+                best_size = probe_size / 2;
+                if (best_size < TIMING_INITIAL_SIZE) best_size = TIMING_INITIAL_SIZE;
+                break;
+            }
+            if (pms >= TIMING_WATCHDOG_MS)
+                break;
+
+            /* Below budget: double and try again */
+            uint64_t next = (uint64_t)probe_size * 2;
+            if (next > 0x7FFFFFFF) next = 0x7FFFFFFF;
+            probe_size = (uint32_t)next;
+        }
+
+        d->fam_max_items[fam] = best_size;
+        d->fam_timed[fam] = 1;
+        fprintf(stderr, "OpenCL GPU[%d]: timed family %d: max_items=%u (%.1fms)\n",
+                dev_idx, fam, best_size, best_ms);
+
+        /* Reset hit counter after probe */
+        uint32_t zero2 = 0;
+        if (p_clEnqueueFillBuffer)
+            clEnqueueFillBuffer(d->queue, d->b_hit_count, &zero2, sizeof(zero2), 0, sizeof(zero2), 0, NULL, NULL);
+        else
+            clEnqueueWriteBuffer(d->queue, d->b_hit_count, CL_TRUE, 0, sizeof(zero2), &zero2, 0, NULL, NULL);
+        clFinish(d->queue);
+    }
+
+    /* Use timed chunk size if available, otherwise fall back to defaults */
+    uint32_t timed_max = (fam >= 0 && fam < FAM_COUNT && d->fam_timed[fam])
+        ? d->fam_max_items[fam] : 0;
+
     int salt_chunk = total_salts;
-    if (d->max_dispatch > 0 && is_salted && num_words > 0) {
+    if (timed_max > 0 && is_salted && num_words > 0) {
+        salt_chunk = (int)(timed_max / num_words);
+        if (salt_chunk < 1024) salt_chunk = 1024;
+    } else if (d->max_dispatch > 0 && is_salted && num_words > 0) {
         salt_chunk = d->max_dispatch / num_words;
         if (salt_chunk < 1024) salt_chunk = 1024;
     }
 
-#define MASK_CHUNK 4194304  /* 4M mask combinations per dispatch */
+#define MASK_CHUNK_DEFAULT 4194304  /* 4M mask combinations per dispatch (fallback) */
     uint64_t mask_start_base = is_mask ? _mask_resume : 0;
     uint64_t mask_total = is_mask ? (gpu_mask_total - mask_start_base) : 0;
-    uint64_t mask_chunk = is_mask ? MASK_CHUNK : 0;
+    uint64_t mask_chunk;
+    if (is_mask) {
+        if (timed_max > 0 && num_words > 0)
+            mask_chunk = timed_max / num_words;
+        else
+            mask_chunk = MASK_CHUNK_DEFAULT;
+        if (mask_chunk < 1) mask_chunk = 1;
+    } else {
+        mask_chunk = 0;
+    }
     if (mask_chunk > mask_total) mask_chunk = mask_total;
     _mask_resume = 0;  /* consumed — reset for next dispatch */
 
@@ -1136,9 +1261,25 @@ uint32_t *gpu_opencl_dispatch_batch(int dev_idx,
 
     for (int chunk = 0; chunk < num_chunks; chunk++) {
         if (is_mask) {
-            params.mask_start = (uint32_t)(mask_start_base + chunk * mask_chunk);
-            params.num_masks = (uint32_t)(mask_total - chunk * mask_chunk);
-            if (params.num_masks > mask_chunk) params.num_masks = (uint32_t)mask_chunk;
+            params.mask_start = mask_start_base + (uint64_t)chunk * mask_chunk;
+            { uint64_t remaining = mask_total - (uint64_t)chunk * mask_chunk;
+              if (remaining > mask_chunk) remaining = mask_chunk;
+              params.num_masks = (uint32_t)remaining;
+            }
+            /* Pre-decompose mask_start into per-position base offsets */
+            { uint64_t ms = params.mask_start;
+              uint64_t b0 = 0, b1 = 0;
+              int ntot = gpu_mask_n_prepend + gpu_mask_n_append;
+              for (int bi = ntot - 1; bi >= 0; bi--) {
+                uint8_t sz = gpu_mask_sizes[bi];
+                uint8_t digit = (uint8_t)(ms % sz);
+                ms /= sz;
+                if (bi < 8) b0 |= (uint64_t)digit << (bi * 8);
+                else        b1 |= (uint64_t)digit << ((bi - 8) * 8);
+              }
+              params.mask_base0 = b0;
+              params.mask_base1 = b1;
+            }
             clEnqueueWriteBuffer(d->queue, d->b_params, CL_TRUE, 0, sizeof(params), &params, 0, NULL, NULL);
         } else if (is_salted) {
             params.salt_start = salt_start_base + chunk * salt_chunk;
@@ -1156,6 +1297,14 @@ uint32_t *gpu_opencl_dispatch_batch(int dev_idx,
             : (size_t)num_words;
         global = ((global + local - 1) / local) * local;
 
+        /* Zero hit counter before each chunk */
+        { uint32_t zero = 0;
+          if (p_clEnqueueFillBuffer)
+            clEnqueueFillBuffer(d->queue, d->b_hit_count, &zero, sizeof(zero), 0, sizeof(zero), 0, NULL, NULL);
+          else
+            clEnqueueWriteBuffer(d->queue, d->b_hit_count, CL_TRUE, 0, sizeof(zero), &zero, 0, NULL, NULL);
+        }
+
         err = clEnqueueNDRangeKernel(d->queue, kern, 1, NULL, &global, &local, 0, NULL, NULL);
         if (err != CL_SUCCESS) {
             fprintf(stderr, "OpenCL GPU[%d] dispatch error: %d (chunk %d/%d global=%zu)\n",
@@ -1169,6 +1318,41 @@ uint32_t *gpu_opencl_dispatch_batch(int dev_idx,
             break;
           }
         }
+
+        /* Update Tothash for progress tracking */
+        { extern unsigned long long Tothash;
+          size_t actual = is_mask ? (size_t)num_words * params.num_masks
+                        : is_salted ? (size_t)num_words * params.num_salts
+                        : (size_t)num_words;
+          __sync_fetch_and_add(&Tothash, actual);
+        }
+
+        /* Check for hits — return immediately if any found */
+        { uint32_t chunk_hits;
+          clEnqueueReadBuffer(d->queue, d->b_hit_count, CL_TRUE, 0, sizeof(chunk_hits), &chunk_hits, 0, NULL, NULL);
+          if (chunk_hits > 0) {
+            *nhits_out = (int)chunk_hits;
+            if (chunk_hits > GPU_MAX_HITS) chunk_hits = GPU_MAX_HITS;
+            int cat = gpu_op_category(_gpu_op);
+            int is_md5crypt = (_gpu_op == JOB_MD5CRYPT || _gpu_op == JOB_PHPBB3);
+            int is_bcrypt = (_gpu_op == JOB_BCRYPT);
+            int hw = is_bcrypt ? 6 : gpu_hash_words(_gpu_op);
+            int stride = is_md5crypt ? 6
+                : is_bcrypt ? 9
+                : (_max_iter > 1 || cat == GPU_CAT_ITER || cat == GPU_CAT_SALTPASS)
+                    ? (3 + hw) : (2 + hw);
+            clEnqueueReadBuffer(d->queue, d->b_hits, CL_TRUE, 0,
+                chunk_hits * stride * sizeof(uint32_t), d->h_hits, 0, NULL, NULL);
+            /* Set resume point and record mask_start for hit reconstruction */
+            _last_mask_start = params.mask_start;
+            if (is_mask) {
+                uint64_t next = mask_start_base + (uint64_t)(chunk + 1) * mask_chunk;
+                if (next < gpu_mask_total)
+                    _mask_resume = next;
+            }
+            return d->h_hits;
+          }
+        }
     }
 
     if (!gk->tuned) {
@@ -1177,21 +1361,21 @@ uint32_t *gpu_opencl_dispatch_batch(int dev_idx,
         kern_record_time(gk, ms);
     }
 
-    /* Read back */
+    /* All chunks completed — check final hit count (salted single-chunk etc.) */
+    *nhits_out = 0;
     uint32_t raw_nhits;
     clEnqueueReadBuffer(d->queue, d->b_hit_count, CL_TRUE, 0, sizeof(raw_nhits), &raw_nhits, 0, NULL, NULL);
-
     *nhits_out = (int)raw_nhits;
     if (raw_nhits > 0) {
         if (raw_nhits > GPU_MAX_HITS) raw_nhits = GPU_MAX_HITS;
         int cat = gpu_op_category(_gpu_op);
-        int is_sha256 = (_gpu_op == JOB_SHA256PASSSALT || _gpu_op == JOB_SHA256SALTPASS);
-        int is_sha1 = (_gpu_op == JOB_SHA1PASSSALT || _gpu_op == JOB_SHA1SALTPASS || _gpu_op == JOB_SHA1DRU);
         int is_md5crypt = (_gpu_op == JOB_MD5CRYPT || _gpu_op == JOB_PHPBB3);
         int is_bcrypt = (_gpu_op == JOB_BCRYPT);
-        int stride = is_sha256 ? 11 : is_bcrypt ? 9 : is_sha1 ? 8
-            : is_md5crypt ? 6
-            : (_max_iter > 1 || cat == GPU_CAT_ITER || cat == GPU_CAT_SALTPASS) ? 7 : 6;
+        int hw = is_bcrypt ? 6 : gpu_hash_words(_gpu_op);
+        int stride = is_md5crypt ? 6
+            : is_bcrypt ? 9
+            : (_max_iter > 1 || cat == GPU_CAT_ITER || cat == GPU_CAT_SALTPASS)
+                ? (3 + hw) : (2 + hw);
         clEnqueueReadBuffer(d->queue, d->b_hits, CL_TRUE, 0, raw_nhits * stride * sizeof(uint32_t), d->h_hits, 0, NULL, NULL);
     }
     return d->h_hits;

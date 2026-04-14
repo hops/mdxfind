@@ -183,9 +183,15 @@ int Neon;
 #define mysha1 SHA1
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.300 2026/04/12 23:03:49 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.302 2026/04/14 09:21:10 dlr Exp dlr $";
 /*
  * $Log: mdxfind.c,v $
+ * Revision 1.302  2026/04/14 09:21:10  dlr
+ * Divide lineswanted by Numrules when rules are active, so jobs are smaller and more cores stay busy. Regression fix — rule count was previously factored into job sizing.
+ *
+ * Revision 1.301  2026/04/14 04:46:10  dlr
+ * GPU brute-force: timing probe, per-chunk dispatch, uint64 mask_start, base-offset decomposition, immediate hit processing, MD5SHA256SHA256 (e996)
+ *
  * Revision 1.300  2026/04/12 23:03:49  dlr
  * Add -G force for GPU regression testing, fix stride detection for non-standard types
  *
@@ -4366,6 +4372,7 @@ char *Types[] = {
     "WPBCRYPT",
     "GOST12512CRYPT",
     "YESCRYPT",
+    "MD5SHA256SHA256",
 
 NULL
 
@@ -5389,6 +5396,7 @@ NULL
 #define JOB_WPBCRYPT        993
 #define JOB_GOST12512CRYPT  994
 #define JOB_YESCRYPT        995
+#define JOB_MD5SHA256SHA256 996
 
 #define JOB_DONE 2000
 
@@ -6408,6 +6416,7 @@ static unsigned short TypeOpts[JOB_DONE] = {
 [993] = TYPEOPT_NEEDSJ | TYPEOPT_SALTJUDY,                    /* WPBCRYPT */
 [994] = TYPEOPT_NEEDSJ | TYPEOPT_NEEDSALT | TYPEOPT_SALTJUDY, /* GOST12512CRYPT */
 [995] = TYPEOPT_NEEDSJ | TYPEOPT_NEEDSALT | TYPEOPT_SALTJUDY, /* YESCRYPT */
+    [996] = TYPEOPT_NEEDSF,  /* MD5SHA256SHA256 */
 };
 
 unsigned long Iter_Count[] = {0, 10, 10, 100, 100, 1000, 1000, 1000, 1000, 10000, 10000, 10000, 10000, 100000, 100000, 100000, 100000};
@@ -6627,6 +6636,11 @@ lock *FreeWaiting, *WorkWaiting, *TestVecWaiting, *Stats;
 static lock *ReadBuf0, *ReadBuf1, *HashWaiting;
 static lock *ServerState;
 unsigned long long Tothash, Totfound, Totrules;
+/* Brute-force progress tracking for ReportStats */
+static int BruteForceMode = 0;
+static unsigned long long BruteForceTotal = 0;  /* total keyspace */
+static volatile unsigned long long BruteForceProgress = 0;  /* candidates dispatched so far */
+static char BruteForceCandidate[256];  /* current sample candidate for display */
 atomic_ullong *Totalfound[JOB_DONE], *RuleCnt;
 
 /* SIGUSR1 pauses, SIGUSR2 resumes (Unix); named events (Windows) */
@@ -22545,6 +22559,13 @@ MD_SHA_start:
                 goto MDstart;
 
 
+              case JOB_MD5SHA256SHA256:
+		hashcnt++;
+                mysha256(cur, len, curin.h);
+                cur = prmd5(curin.h, linebuf, 64);
+                len = 64;
+		goto md5sha256;
+
               case JOB_MD5SHA256MD5:
 		hashcnt++;
                 mymd5(cur, len, curin.h);
@@ -22552,6 +22573,7 @@ MD_SHA_start:
                 len = 32;
 
               case JOB_MD5SHA256:
+md5sha256:
                 mysha256(cur, len, curin.h);
 		hashcnt++;
                 cur = prmd5(curin.h, linebuf, 64);
@@ -35240,9 +35262,51 @@ MDXALIGN void ReportStats(void *dummy) {
     format_rate((double)Tothash / wtime, &hps, &mult1);
     format_rate(lps, &lps, &mult);
 
-    fprintf(stderr, "Working on %s, w=%ld, line %llu, Found=%llu, %.2f%sh/s, %.2f%sc/s\n",
-            Curfile, peek_lock(WorkWaiting), (Lowline+LowSkip), Totfound, hps, mult1, lps, mult);
+    if (BruteForceMode && BruteForceTotal > 0) {
+      /* Brute-force progress display:
+       * Show keyspace progress, rate, sample candidate, and ETA */
+      /* Tothash tracks completed hash computations across all active types.
+       * For brute-force with N types, each candidate is hashed N times. */
+      unsigned long long progress = Tothash;
+      { int nactive = 0; int ti = 0, trc;
+        J1F(trc, Dohash, ti);
+        while (trc) { nactive++; J1N(trc, Dohash, ti); }
+        if (nactive > 1) progress /= nactive;
+      }
+      double pct = (BruteForceTotal > 0) ? (100.0 * progress / BruteForceTotal) : 0;
+      /* Generate sample candidate from completed progress position */
+      char sample[MAX_MASK_POS + 1];
+      unsigned long long sample_idx = progress < BruteForceTotal ? progress : BruteForceTotal - 1;
+      int slen = mask_expand_into(sample_idx, MaskAppendPattern, MaskAppendLen, sample);
+      sample[slen] = 0;
+      /* ETA based on keyspace progress rate */
+      double rate = (double)progress / wtime;
+      double remaining = (rate > 0 && progress < BruteForceTotal) ?
+                          (BruteForceTotal - progress) / rate : 0;
+      char eta[64];
+      if (remaining <= 0 || progress >= BruteForceTotal)
+        snprintf(eta, sizeof(eta), "done");
+      else if (remaining < 60)
+        snprintf(eta, sizeof(eta), "%.0fs", remaining);
+      else if (remaining < 3600)
+        snprintf(eta, sizeof(eta), "%dm%02ds", (int)(remaining/60), (int)((int)remaining%60));
+      else if (remaining < 86400)
+        snprintf(eta, sizeof(eta), "%dh%02dm", (int)(remaining/3600), (int)(((int)remaining%3600)/60));
+      else
+        snprintf(eta, sizeof(eta), "%dd%dh", (int)(remaining/86400), (int)(((int)remaining%86400)/3600));
+      /* Format progress with SI prefix */
+      double dprog = (double)progress, dtotal = (double)BruteForceTotal;
+      char *pmult = "", *tmult = "";
+      format_rate(dprog, &dprog, &pmult);
+      format_rate(dtotal, &dtotal, &tmult);
+      fprintf(stderr, "Brute %s, %.1f%s/%.1f%s (%.1f%%), Found=%llu, %.2f%sh/s, '%s', ETA %s\n",
+              Curfile, dprog, pmult, dtotal, tmult, pct, Totfound, hps, mult1, sample, eta);
+    } else {
+      fprintf(stderr, "Working on %s, w=%ld, line %llu, Found=%llu, %.2f%sh/s, %.2f%sc/s\n",
+              Curfile, peek_lock(WorkWaiting), (Lowline+LowSkip), Totfound, hps, mult1, lps, mult);
+    }
     fflush(stdout);
+    fflush(stderr);
   }
 }
 
@@ -44434,6 +44498,129 @@ usage:
   win_pause_init();
 #endif
   launch(ReportStats, NULL);
+
+  /* Brute-force detection: if exactly one argument and it is not a file,
+   * try parsing it as a mask pattern. */
+  if (argc == 1 && strcmp(argv[0], "stdin") != 0) {
+    struct stat bf_sb;
+    if (stat(argv[0], &bf_sb) != 0) {
+      fprintf(stderr, "File %s not found: %s\n", argv[0], strerror(errno));
+      mask_init_classes();
+      if (parse_mask_into(argv[0], MaskAppendPattern, &MaskAppendLen,
+                          &MaskAppendTotal) == 0) {
+        MaskPrependLen = 0; MaskPrependTotal = 1;
+        memcpy(MaskPattern, MaskAppendPattern, sizeof(MaskPattern));
+        MaskLen = MaskAppendLen;
+        MaskTotal = MaskAppendTotal;
+        Dodigits = MaskAppendLen;
+        Maxnumbers = MaskTotal;
+        NumbersFmt = NULL;
+        { int ci;
+          MaskChunkSize = 1;
+          for (ci = MaskAppendLen - 1; ci >= 0; ci--) {
+            if (MaskAppendPattern[ci].classid != MASK_LITERAL) {
+              MaskChunkSize = MaskClasses[MaskAppendPattern[ci].classid].count;
+              break;
+            }
+          }
+        }
+        if (MaskTotal > 1) {
+          fprintf(stderr, "Brute force processing detected: %llu candidates from mask '%s'\n",
+                  MaskTotal, argv[0]);
+          BruteForceMode = 1;
+          BruteForceTotal = MaskTotal;
+        } else {
+          BruteForceMode = 1;  /* single candidate test mode */
+          BruteForceTotal = 1;
+        }
+
+        /* Set up GPU mask tables if GPU is available */
+#ifdef GPU_ENABLED
+        if (gpujob_available()) {
+          static uint8_t bf_mask_sizes[MAX_MASK_POS * 2];
+          static uint8_t bf_mask_tables[MAX_MASK_POS * 2][256];
+          int bf_napp = 0;
+          int bf_ok = 1;
+          for (int mi = 0; mi < MaskAppendLen; mi++) {
+            int cid = MaskAppendPattern[mi].classid;
+            if (cid == MASK_LITERAL) {
+              bf_mask_sizes[bf_napp] = 1;
+              memset(bf_mask_tables[bf_napp], 0, 256);
+              bf_mask_tables[bf_napp][0] = MaskAppendPattern[mi].literal;
+              bf_napp++;
+            } else if (cid >= 0 && cid < MASK_MAX_CLASSES && MaskClasses[cid].count > 0) {
+              bf_mask_sizes[bf_napp] = (uint8_t)MaskClasses[cid].count;
+              memcpy(bf_mask_tables[bf_napp], MaskClasses[cid].chars, 256);
+              bf_napp++;
+            } else { bf_ok = 0; break; }
+          }
+          if (bf_ok && bf_napp > 0) {
+#if defined(OPENCL_GPU)
+            gpu_opencl_set_mask(bf_mask_sizes, bf_mask_tables, 0, bf_napp);
+#elif defined(METAL_GPU)
+            gpu_metal_set_mask(bf_mask_sizes, bf_mask_tables, 0, bf_napp);
+#endif
+          }
+        }
+#endif
+
+        /* Dispatch brute-force: one job per algorithm type with full keyspace.
+         * GPU handles mask chunking internally. ReportStats tracks Tothash. */
+        Totalfiles = 1;
+        Curfile = argv[0];
+        doneprint = 0;
+        Readindex[0].offset = 0;
+        Readindex[0].len = 0;
+        Readbuf[0] = 0;
+        { int NextX = 0, RC;
+          J1F(RC, Dohash, NextX);
+          while (RC) {
+            x = NextX;
+            if (!Typedone[x]) {
+              possess(FreeWaiting);
+              wait_for(FreeWaiting, NOT_TO_BE, 0);
+              job = FreeHead;
+              if (!job) { fprintf(stderr, "Job null on freehead!\n"); exit(1); }
+              FreeHead = job->next;
+              job->next = NULL;
+              if (FreeHead == NULL) FreeTail = &FreeHead;
+              twist(FreeWaiting, BY, -1);
+
+              job->op = x;
+              job->flags = JOBFLAG_NUMBERS | JOBFLAG_BRUTEFORCE;
+              job->Numbers = 0;
+              job->digits = Dodigits;
+              job->MaskIndex = 0;
+              job->MaskCount = MaskTotal;
+              job->doneprint = &doneprint;
+              job->filename = argv[0];
+              job->startline = 0;
+              job->numline = 1;
+              job->readbuf = Readbuf;
+              job->readindex = Readindex;
+              possess(ReadBuf0);
+              twist(ReadBuf0, BY, +1);
+              if (ThreadCount < maxt) {
+                launch(procjob, NULL);
+                ThreadCount++;
+              }
+              possess(WorkWaiting);
+              *WorkTail = job;
+              WorkTail = &(job->next);
+              twist(WorkWaiting, BY, +1);
+            }
+            J1N(RC, Dohash, NextX);
+          }
+        }
+        Totallines = 1;
+        goto bf_done;
+      } else {
+        fprintf(stderr, "Could not parse '%s' as a mask pattern, exiting\n", argv[0]);
+        exit(1);
+      }
+    }
+  }
+
   for (y = 0; y < argc; y++) {
     doneprint = 0;
     if (isstdin == 0 && strcmp(argv[y], "stdin") == 0) {
@@ -44511,6 +44698,8 @@ reprocess:
 	      linehints[x].lineswanted /= Livesalts[x];
 	    if (MaskTotal > 1)
 	      linehints[x].lineswanted /= MaskTotal;
+	    if (Numrules > 1)
+	      linehints[x].lineswanted /= Numrules;
 	    if (linehints[x].rate < 100)
 	      linehints[x].lineswanted = 1;
 	    else if (linehints[x].lineswanted < 512)
@@ -44583,6 +44772,7 @@ reprocess:
     if (!Creader.gz_closed) gzclose(zfi);
     creader_reset();
   }
+bf_done:
   possess(FreeWaiting);
   wait_for(FreeWaiting, TO_BE, alloc_maxt * 32);
   job = FreeHead;
@@ -44595,12 +44785,11 @@ reprocess:
     *WorkTail = job;
     WorkTail = &(job->next);
     twist(WorkWaiting, BY, +1);
-    possess(HashWaiting);
-    twist(HashWaiting, TO, 1);
-
 #ifdef GPU_ENABLED
-    gpujob_shutdown(); /* must be before join_all — gpujob needs JOB_DONE to exit */
+    gpujob_shutdown(); /* wait for GPU to finish all work */
 #endif
+    possess(HashWaiting);
+    twist(HashWaiting, TO, 1);  /* now signal ReportStats to exit */
     x = join_all();
 #ifdef OPENCL_GPU
     gpu_opencl_shutdown(); /* explicit — atexit races with NVIDIA driver teardown */

@@ -153,9 +153,29 @@ endif
 sha1_shani.o: sha1_shani.c
 	$(CC) -O3 -msha -msse4.1 -c sha1_shani.c
 
+# ---- GPU kernel source → embedded string headers ----
+# OpenCL kernels: .cl → _str.h
+gpu/%_str.h: gpu/%.cl gpu/cl2str.py
+	cd gpu && python3 cl2str.py $*.cl
+
+# Metal kernels: .metal → _str.h
+gpu/%_str.h: gpu/%.metal gpu/cl2str.py
+	cd gpu && python3 cl2str.py $*.metal
+
+# ---- Precompiled Metal library (embedded in binary) ----
+METAL_SOURCES = $(wildcard gpu/metal_*.metal)
+
+gpu/mdxfind.metallib: $(METAL_SOURCES) gpu/build_metallib.sh
+	gpu/build_metallib.sh
+
+gpu/mdxfind_metallib.h: gpu/mdxfind.metallib
+	xxd -i gpu/mdxfind.metallib > gpu/mdxfind_metallib.h
+
+metallib: gpu/mdxfind_metallib.h
+
 # Metal GPU source files (Objective-C++)
 ifdef METAL_GPU
-gpu_metal.o: gpu_metal.m gpu_metal.h gpujob.h job_types.h \
+gpu_metal.o: gpu_metal.m gpu_metal.h gpujob.h job_types.h gpu/mdxfind_metallib.h \
              gpu/metal_common_str.h gpu/metal_md5salt_str.h gpu/metal_md5saltpass_str.h \
              gpu/metal_md5_md5saltmd5pass_str.h gpu/metal_sha256_str.h gpu/metal_phpbb3_str.h \
              gpu/metal_descrypt_str.h gpu/metal_md5unsalted_str.h gpu/metal_md4unsalted_str.h \

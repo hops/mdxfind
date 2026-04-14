@@ -7,59 +7,8 @@
  *             7 (word_idx, mask_idx, iter, h0, h1, h2, h3) when max_iter > 1
  */
 
-static inline uint bswap32(uint x) {
-    return ((x >> 24) & 0xffu) | ((x >> 8) & 0xff00u) |
-           ((x << 8) & 0xff0000u) | ((x << 24) & 0xff000000u);
-}
-
-/* Convert one byte to 2 packed hex chars (lowercase, BE word packing) */
-static uint hex_byte_be(uint b) {
-    uint hi = (b >> 4) & 0xf;
-    uint lo = b & 0xf;
-    return ((hi + ((hi < 10) ? '0' : ('a' - 10))) << 8)
-         |  (lo + ((lo < 10) ? '0' : ('a' - 10)));
-}
-
-/* Convert 5 SHA1 BE state words to 10 BE M[] words of hex text (lowercase).
- * SHA1 state is big-endian: byte 0 = bits 24-31 (MSB first).
- * Each state word -> 8 hex chars -> 2 BE M[] words. */
-static void sha1_to_hex_lc(thread uint *state, thread uint *M) {
-    for (int i = 0; i < 5; i++) {
-        uint s = state[i];
-        uint b0 = (s >> 24) & 0xff, b1 = (s >> 16) & 0xff;
-        uint b2 = (s >> 8)  & 0xff, b3 = s & 0xff;
-        M[i*2]   = (hex_byte_be(b0) << 16) | hex_byte_be(b1);
-        M[i*2+1] = (hex_byte_be(b2) << 16) | hex_byte_be(b3);
-    }
-}
-
-/* SHA1 block function — M[] must be big-endian uint32 words */
-static void sha1_compress(thread uint *state, thread uint *M) {
-    uint W[80];
-    for (int i = 0; i < 16; i++) W[i] = M[i];
-    for (int i = 16; i < 80; i++)
-        W[i] = rotate(W[i-3] ^ W[i-8] ^ W[i-14] ^ W[i-16], 1u);
-
-    uint a = state[0], b = state[1], c = state[2], d = state[3], e = state[4];
-    uint t;
-    for (int i = 0; i < 20; i++) {
-        t = rotate(a, 5u) + ((b & c) | (~b & d)) + e + 0x5A827999u + W[i];
-        e = d; d = c; c = rotate(b, 30u); b = a; a = t;
-    }
-    for (int i = 20; i < 40; i++) {
-        t = rotate(a, 5u) + (b ^ c ^ d) + e + 0x6ED9EBA1u + W[i];
-        e = d; d = c; c = rotate(b, 30u); b = a; a = t;
-    }
-    for (int i = 40; i < 60; i++) {
-        t = rotate(a, 5u) + ((b & c) | (b & d) | (c & d)) + e + 0x8F1BBCDCu + W[i];
-        e = d; d = c; c = rotate(b, 30u); b = a; a = t;
-    }
-    for (int i = 60; i < 80; i++) {
-        t = rotate(a, 5u) + (b ^ c ^ d) + e + 0xCA62C1D6u + W[i];
-        e = d; d = c; c = rotate(b, 30u); b = a; a = t;
-    }
-    state[0] += a; state[1] += b; state[2] += c; state[3] += d; state[4] += e;
-}
+/* bswap32, hex_byte_be, sha1_to_hex_lc, sha1_compress
+ * all provided by metal_common.metal */
 
 kernel void sha1_unsalted_batch(
     device const uint       *words       [[buffer(0)]],
@@ -85,7 +34,7 @@ kernel void sha1_unsalted_batch(
     uint                     tgsize       [[threads_per_threadgroup]])
 {
     uint word_idx = tid / params.num_masks;
-    uint mask_idx = params.mask_start + (tid % params.num_masks);
+    ulong mask_idx = params.mask_start + (tid % params.num_masks);
     if (word_idx >= params.num_words) return;
 
     device const uint *src = words + word_idx * 16;
@@ -98,14 +47,14 @@ kernel void sha1_unsalted_batch(
 
     if (n_pre > 0 || n_app > 0) {
         uint n_total_m = n_pre + n_app;
-        uint append_combos = 1;
-        for (uint i = 0; i < n_app; i++)
-            append_combos *= mask_desc[n_pre + i];
-
-        uint prepend_idx = mask_idx / append_combos;
-        uint append_idx = mask_idx % append_combos;
 
         if (n_pre > 0) {
+            uint append_combos = 1;
+            for (uint i = 0; i < n_app; i++)
+                append_combos *= mask_desc[n_pre + i];
+            uint prepend_idx = (uint)(mask_idx / append_combos);
+            uint append_idx = (uint)(mask_idx % append_combos);
+
             uint pidx = prepend_idx;
             for (int i = (int)n_pre - 1; i >= 0; i--) {
                 uint sz = mask_desc[i];
@@ -114,17 +63,42 @@ kernel void sha1_unsalted_batch(
                 M[i >> 2] = (M[i >> 2] & ~(0xFFu << ((i & 3) << 3)))
                            | ((uint)ch << ((i & 3) << 3));
             }
-        }
 
-        if (n_app > 0) {
+            if (n_app > 0) {
+                int total_len = M[14] >> 3;
+                int app_start = total_len - (int)n_app;
+                uint aidx = append_idx;
+                for (int i = (int)n_app - 1; i >= 0; i--) {
+                    int pos_idx = n_pre + i;
+                    uint sz = mask_desc[pos_idx];
+                    uchar ch = mask_desc[n_total_m + pos_idx * 256 + (aidx % sz)];
+                    aidx /= sz;
+                    int pos = app_start + i;
+                    M[pos >> 2] = (M[pos >> 2] & ~(0xFFu << ((pos & 3) << 3)))
+                                 | ((uint)ch << ((pos & 3) << 3));
+                }
+            }
+        } else {
+            /* Append-only (brute-force): host pre-decomposes mask_start into
+             * per-position base offsets in mask_base0/mask_base1. Kernel does
+             * fast uint32 local decomposition and adds to base with carry. */
             int total_len = M[14] >> 3;
             int app_start = total_len - (int)n_app;
-            uint aidx = append_idx;
+            uint local_idx = tid % params.num_masks;  /* uint32, fast */
+            uint aidx = local_idx;
+            uint carry = 0;
             for (int i = (int)n_app - 1; i >= 0; i--) {
-                int pos_idx = n_pre + i;
-                uint sz = mask_desc[pos_idx];
-                uchar ch = mask_desc[n_total_m + pos_idx * 256 + (aidx % sz)];
+                uint sz = mask_desc[i];
+                uint local_digit = aidx % sz;
                 aidx /= sz;
+                /* Extract pre-decomposed base digit from packed mask_base */
+                uint base_digit = (i < 8)
+                    ? (uint)((params.mask_base0 >> (i * 8)) & 0xFF)
+                    : (uint)((params.mask_base1 >> ((i - 8) * 8)) & 0xFF);
+                uint sum = base_digit + local_digit + carry;
+                carry = sum / sz;
+                uint final_digit = sum % sz;
+                uchar ch = mask_desc[n_total_m + i * 256 + final_digit];
                 int pos = app_start + i;
                 M[pos >> 2] = (M[pos >> 2] & ~(0xFFu << ((pos & 3) << 3)))
                              | ((uint)ch << ((pos & 3) << 3));
@@ -147,15 +121,15 @@ kernel void sha1_unsalted_batch(
     sha1_compress(state, M);
 
     uint max_iter = params.max_iter;
-    uint hit_stride = (max_iter > 1) ? 7 : 6;
+    /* SHA1: 5 hash words. hit_stride = 2 + 5 = 7, or 3 + 5 = 8 with iter */
+    uint hit_stride = (max_iter > 1) ? 8 : 7;
 
     for (uint iter = 1; iter <= max_iter; iter++) {
         /* Byte-swap state to LE for compact table probe */
-        uint hx = bswap32(state[0]), hy = bswap32(state[1]);
-        uint hz = bswap32(state[2]), hw = bswap32(state[3]);
+        uint h[5];
+        for (int i = 0; i < 5; i++) h[i] = bswap32(state[i]);
 
-        uint4 h = uint4(hx, hy, hz, hw);
-        ulong key = (ulong(h.y) << 32) | h.x;
+        ulong key = (ulong(h[1]) << 32) | h[0];
         uint fp = uint(key >> 32);
         if (fp == 0) fp = 1;
         ulong pos = (key ^ (key >> 32)) & params.compact_mask;
@@ -168,7 +142,7 @@ kernel void sha1_unsalted_batch(
                 if (idx < params.hash_data_count) {
                     ulong off = hash_data_off[idx];
                     device const uint *ref = (device const uint *)(hash_data_buf + off);
-                    if (h.x == ref[0] && h.y == ref[1] && h.z == ref[2] && h.w == ref[3])
+                    if (h[0] == ref[0] && h[1] == ref[1] && h[2] == ref[2] && h[3] == ref[3])
                         found = true;
                 }
             }
@@ -184,12 +158,12 @@ kernel void sha1_unsalted_batch(
                 else {
                     for (int d = mid; d >= 0 && overflow_keys[d] == key && !found; d--) {
                         device const uint *oref = (device const uint *)(overflow_hashes + overflow_offsets[d]);
-                        if (h.x == oref[0] && h.y == oref[1] && h.z == oref[2] && h.w == oref[3])
+                        if (h[0] == oref[0] && h[1] == oref[1] && h[2] == oref[2] && h[3] == oref[3])
                             found = true;
                     }
                     for (int d = mid+1; d < int(params.overflow_count) && overflow_keys[d] == key && !found; d++) {
                         device const uint *oref = (device const uint *)(overflow_hashes + overflow_offsets[d]);
-                        if (h.x == oref[0] && h.y == oref[1] && h.z == oref[2] && h.w == oref[3])
+                        if (h[0] == oref[0] && h[1] == oref[1] && h[2] == oref[2] && h[3] == oref[3])
                             found = true;
                     }
                     break;
@@ -201,13 +175,11 @@ kernel void sha1_unsalted_batch(
             if (slot < params.max_hits) {
                 uint base = slot * hit_stride;
                 hits[base] = word_idx; hits[base+1] = mask_idx;
-                if (hit_stride == 7) {
+                if (max_iter > 1) {
                     hits[base+2] = iter;
-                    hits[base+3] = h.x; hits[base+4] = h.y;
-                    hits[base+5] = h.z; hits[base+6] = h.w;
+                    for (int i = 0; i < 5; i++) hits[base+3+i] = h[i];
                 } else {
-                    hits[base+2] = h.x; hits[base+3] = h.y;
-                    hits[base+4] = h.z; hits[base+5] = h.w;
+                    for (int i = 0; i < 5; i++) hits[base+2+i] = h[i];
                 }
             }
         }
@@ -249,7 +221,7 @@ kernel void sql5_unsalted_batch(
     uint                     tgsize       [[threads_per_threadgroup]])
 {
     uint word_idx = tid / params.num_masks;
-    uint mask_idx = params.mask_start + (tid % params.num_masks);
+    ulong mask_idx = params.mask_start + (tid % params.num_masks);
     if (word_idx >= params.num_words) return;
 
     device const uint *src = words + word_idx * 16;
@@ -263,8 +235,8 @@ kernel void sql5_unsalted_batch(
         uint append_combos = 1;
         for (uint i = 0; i < n_app; i++)
             append_combos *= mask_desc[n_pre + i];
-        uint prepend_idx = mask_idx / append_combos;
-        uint append_idx = mask_idx % append_combos;
+        uint prepend_idx = (uint)(mask_idx / append_combos);
+        uint append_idx = (uint)(mask_idx % append_combos);
         if (n_pre > 0) {
             uint pidx = prepend_idx;
             for (int i = (int)n_pre - 1; i >= 0; i--) {
@@ -309,15 +281,16 @@ kernel void sql5_unsalted_batch(
     state[2] = 0x98BADCFEu; state[3] = 0x10325476u; state[4] = 0xC3D2E1F0u;
     sha1_compress(state, M);
 
-    uint hx = bswap32(state[0]), hy = bswap32(state[1]);
-    uint hz = bswap32(state[2]), hw = bswap32(state[3]);
+    /* SQL5: 5 hash words */
+    uint h[5];
+    for (int i = 0; i < 5; i++) h[i] = bswap32(state[i]);
 
-    uint4 h = uint4(hx, hy, hz, hw);
-    ulong key = (ulong(h.y) << 32) | h.x;
+    ulong key = (ulong(h[1]) << 32) | h[0];
     uint fp = uint(key >> 32);
     if (fp == 0) fp = 1;
     ulong pos = (key ^ (key >> 32)) & params.compact_mask;
-    for (uint p = 0; p < params.max_probe; p++) {
+    bool found = false;
+    for (uint p = 0; p < params.max_probe && !found; p++) {
         uint cfp = compact_fp[pos];
         if (cfp == 0) break;
         if (cfp == fp) {
@@ -325,68 +298,40 @@ kernel void sql5_unsalted_batch(
             if (idx < params.hash_data_count) {
                 ulong off = hash_data_off[idx];
                 device const uint *ref = (device const uint *)(hash_data_buf + off);
-                if (h.x == ref[0] && h.y == ref[1] && h.z == ref[2] && h.w == ref[3]) {
-                    uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
-                    if (slot < params.max_hits) {
-                        uint base = slot * 6;
-                        hits[base] = word_idx; hits[base+1] = mask_idx;
-                        hits[base+2] = h.x; hits[base+3] = h.y;
-                        hits[base+4] = h.z; hits[base+5] = h.w;
-                    }
-                    return;
-                }
+                if (h[0] == ref[0] && h[1] == ref[1] && h[2] == ref[2] && h[3] == ref[3])
+                    found = true;
             }
         }
         pos = (pos + 1) & params.compact_mask;
     }
-    if (params.overflow_count > 0) {
-        int lo = 0, hi = int(params.overflow_count) - 1;
-        while (lo <= hi) {
-            int mid = (lo + hi) / 2;
+    if (!found && params.overflow_count > 0) {
+        int lo = 0, hi2 = int(params.overflow_count) - 1;
+        while (lo <= hi2 && !found) {
+            int mid = (lo + hi2) / 2;
             ulong mkey = overflow_keys[mid];
-            if (key < mkey) hi = mid - 1;
+            if (key < mkey) hi2 = mid - 1;
             else if (key > mkey) lo = mid + 1;
             else {
-                uint ooff = overflow_offsets[mid];
-                device const uint *oref = (device const uint *)(overflow_hashes + ooff);
-                if (h.x == oref[0] && h.y == oref[1] && h.z == oref[2] && h.w == oref[3]) {
-                    uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
-                    if (slot < params.max_hits) {
-                        uint base = slot * 6;
-                        hits[base] = word_idx; hits[base+1] = mask_idx;
-                        hits[base+2] = h.x; hits[base+3] = h.y;
-                        hits[base+4] = h.z; hits[base+5] = h.w;
-                    }
-                    return;
+                for (int d = mid; d >= 0 && overflow_keys[d] == key && !found; d--) {
+                    device const uint *oref = (device const uint *)(overflow_hashes + overflow_offsets[d]);
+                    if (h[0] == oref[0] && h[1] == oref[1] && h[2] == oref[2] && h[3] == oref[3])
+                        found = true;
                 }
-                for (int d = mid-1; d >= 0 && overflow_keys[d] == key; d--) {
-                    oref = (device const uint *)(overflow_hashes + overflow_offsets[d]);
-                    if (h.x == oref[0] && h.y == oref[1] && h.z == oref[2] && h.w == oref[3]) {
-                        uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
-                        if (slot < params.max_hits) {
-                            uint base = slot * 6;
-                            hits[base] = word_idx; hits[base+1] = mask_idx;
-                            hits[base+2] = h.x; hits[base+3] = h.y;
-                            hits[base+4] = h.z; hits[base+5] = h.w;
-                        }
-                        return;
-                    }
-                }
-                for (int d = mid+1; d < int(params.overflow_count) && overflow_keys[d] == key; d++) {
-                    oref = (device const uint *)(overflow_hashes + overflow_offsets[d]);
-                    if (h.x == oref[0] && h.y == oref[1] && h.z == oref[2] && h.w == oref[3]) {
-                        uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
-                        if (slot < params.max_hits) {
-                            uint base = slot * 6;
-                            hits[base] = word_idx; hits[base+1] = mask_idx;
-                            hits[base+2] = h.x; hits[base+3] = h.y;
-                            hits[base+4] = h.z; hits[base+5] = h.w;
-                        }
-                        return;
-                    }
+                for (int d = mid+1; d < int(params.overflow_count) && overflow_keys[d] == key && !found; d++) {
+                    device const uint *oref = (device const uint *)(overflow_hashes + overflow_offsets[d]);
+                    if (h[0] == oref[0] && h[1] == oref[1] && h[2] == oref[2] && h[3] == oref[3])
+                        found = true;
                 }
                 break;
             }
+        }
+    }
+    if (found) {
+        uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
+        if (slot < params.max_hits) {
+            uint base = slot * 7;  /* 2 + 5 */
+            hits[base] = word_idx; hits[base+1] = mask_idx;
+            for (int i = 0; i < 5; i++) hits[base+2+i] = h[i];
         }
     }
 }
