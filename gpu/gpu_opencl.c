@@ -170,23 +170,31 @@ static void kern_record_time(struct gpu_kern *k, double ms) {
 
 static uint32_t *h_hits = NULL;
 
-/* ---- Params struct (must match kernel) ---- */
+/* ---- GPU Params struct: 128-byte uniform API (must match kernel) ----
+ * All uint64 fields first (8-aligned), then uint32 fields, then reserved.
+ * Identical layout for OpenCL and Metal. No padding holes. */
 typedef struct {
-    uint64_t compact_mask;
-    uint32_t num_words;
-    uint32_t num_salts;
-    uint32_t salt_start;
-    uint32_t max_probe;
-    uint32_t hash_data_count;
-    uint32_t max_hits;
-    uint32_t overflow_count;
-    uint32_t max_iter;
-    uint32_t num_masks;
-    uint64_t mask_start;
-    uint32_t n_prepend;
-    uint32_t n_append;
-    uint64_t mask_base0;   /* pre-decomposed mask_start: positions 0-7 packed as bytes */
-    uint64_t mask_base1;   /* positions 8-15 packed as bytes */
+    /* 8-byte fields (offset 0-31) */
+    uint64_t compact_mask;    /*  0: hash table mask */
+    uint64_t mask_start;      /*  8: mask keyspace offset for chunking */
+    uint64_t mask_base0;      /* 16: pre-decomposed mask_start positions 0-7 */
+    uint64_t mask_base1;      /* 24: pre-decomposed mask_start positions 8-15 */
+    /* 4-byte fields (offset 32-79) */
+    uint32_t num_words;       /* 32: words in this batch */
+    uint32_t num_salts;       /* 36: salts for this dispatch */
+    uint32_t salt_start;      /* 40: starting salt index */
+    uint32_t max_probe;       /* 44: compact table max probe depth */
+    uint32_t hash_data_count; /* 48: entries in hash_data */
+    uint32_t max_hits;        /* 52: hit buffer capacity */
+    uint32_t overflow_count;  /* 56: overflow table entries */
+    uint32_t max_iter;        /* 60: iteration count from -i */
+    uint32_t num_masks;       /* 64: mask combinations per chunk */
+    uint32_t n_prepend;       /* 68: prepend mask positions (-N) */
+    uint32_t n_append;        /* 72: append mask positions (-n) */
+    uint32_t iter_count;      /* 76: per-dispatch iteration count (PHPBB3) */
+    /* Reserved (offset 80-127) */
+    uint32_t reserved32[4];   /* 80-95: reserved uint32 */
+    uint64_t reserved64[4];   /* 96-127: reserved uint64 */
 } OCLParams;
 
 /* ---- Load kernel source from file ---- */
@@ -494,10 +502,10 @@ static int init_device(int di, cl_device_id dev_id) {
 
     /* Per-device dispatch buffers */
     d->b_hits = clCreateBuffer(d->ctx, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
-                               GPU_MAX_HITS * 19 * sizeof(uint32_t), NULL, &err);
+                               GPU_MAX_HITS * GPU_HIT_STRIDE * sizeof(uint32_t), NULL, &err);
     d->b_hit_count = clCreateBuffer(d->ctx, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
                                      sizeof(uint32_t), NULL, &err);
-    d->h_hits = (uint32_t *)malloc_lock(GPU_MAX_HITS * 19 * sizeof(uint32_t),"device_init");
+    d->h_hits = (uint32_t *)malloc_lock(GPU_MAX_HITS * GPU_HIT_STRIDE * sizeof(uint32_t),"device_init");
     d->b_params = dev_buf(d, sizeof(OCLParams), CL_MEM_READ_ONLY);
 
     /* Dummy overflow buffers (replaced when overflow is loaded) */
@@ -592,7 +600,7 @@ static int probe_max_dispatch(int di) {
     cl_mem b_params = clCreateBuffer(d->ctx, CL_MEM_READ_ONLY, sizeof(params), NULL, &err);
 
     /* Hits */
-    cl_mem b_hits = clCreateBuffer(d->ctx, CL_MEM_READ_WRITE, 256 * 6 * sizeof(uint32_t), NULL, &err);
+    cl_mem b_hits = clCreateBuffer(d->ctx, CL_MEM_READ_WRITE, 256 * GPU_HIT_STRIDE * sizeof(uint32_t), NULL, &err);
     cl_mem b_hitcnt = clCreateBuffer(d->ctx, CL_MEM_READ_WRITE, sizeof(uint32_t), NULL, &err);
 
     /* Dummy overflow buffers (empty) */
@@ -870,7 +878,7 @@ int gpu_opencl_set_compact_table(int dev_idx,
                   + hash_data_buf_size                      /* hash_data_buf */
                   + hash_data_count * sizeof(uint64_t)      /* hash_data_off */
                   + hash_data_count * sizeof(uint16_t)      /* hash_data_len */
-                  + GPU_MAX_HITS * 11 * sizeof(uint32_t)     /* hits buffer */
+                  + GPU_MAX_HITS * GPU_HIT_STRIDE * sizeof(uint32_t)     /* hits buffer */
                   + 512 * 256;                              /* hexhash buffer */
     cl_ulong gpu_mem = 0;
     clGetDeviceInfo(d->dev, CL_DEVICE_GLOBAL_MEM_SIZE, sizeof(gpu_mem), &gpu_mem, NULL);
@@ -1084,8 +1092,10 @@ uint32_t *gpu_opencl_dispatch_batch(int dev_idx,
     size_t hexlens_upload = ((num_words > GPUBATCH_MAX) ? GPUBATCH_MAX : num_words) * sizeof(uint16_t);
     clEnqueueWriteBuffer(d->queue, d->b_hexlens, CL_TRUE, 0, hexlens_upload, hexlens, 0, NULL, NULL);
 
-    /* Params */
+    /* Params — verify 128-byte struct matches kernel */
+    _Static_assert(sizeof(OCLParams) == 128, "OCLParams must be 128 bytes");
     OCLParams params;
+    memset(&params, 0, sizeof(params));
     params.compact_mask = _compact_mask;
     params.num_words = num_words;
     params.num_salts = d->salts_count;
@@ -1380,16 +1390,9 @@ uint32_t *gpu_opencl_dispatch_batch(int dev_idx,
           if (chunk_hits > 0) {
             *nhits_out = (int)chunk_hits;
             if (chunk_hits > GPU_MAX_HITS) chunk_hits = GPU_MAX_HITS;
-            int cat = gpu_op_category(_gpu_op);
-            int is_md5crypt = (_gpu_op == JOB_MD5CRYPT || _gpu_op == JOB_PHPBB3);
-            int is_bcrypt = (_gpu_op == JOB_BCRYPT);
-            int hw = is_bcrypt ? 6 : gpu_hash_words(_gpu_op);
-            int stride = is_md5crypt ? 6
-                : is_bcrypt ? 9
-                : (_max_iter > 1 || cat == GPU_CAT_ITER || cat == GPU_CAT_SALTPASS)
-                    ? (3 + hw) : (2 + hw);
+            /* Universal hit stride: all kernels emit 19 uint32 words per hit */
             clEnqueueReadBuffer(d->queue, d->b_hits, CL_TRUE, 0,
-                chunk_hits * stride * sizeof(uint32_t), d->h_hits, 0, NULL, NULL);
+                chunk_hits * GPU_HIT_STRIDE * sizeof(uint32_t), d->h_hits, 0, NULL, NULL);
             /* Set resume point and record mask_start for hit reconstruction */
             _last_mask_start = params.mask_start;
             if (bf_mode) {
@@ -1419,15 +1422,7 @@ uint32_t *gpu_opencl_dispatch_batch(int dev_idx,
     *nhits_out = (int)raw_nhits;
     if (raw_nhits > 0) {
         if (raw_nhits > GPU_MAX_HITS) raw_nhits = GPU_MAX_HITS;
-        int cat = gpu_op_category(_gpu_op);
-        int is_md5crypt = (_gpu_op == JOB_MD5CRYPT || _gpu_op == JOB_PHPBB3);
-        int is_bcrypt = (_gpu_op == JOB_BCRYPT);
-        int hw = is_bcrypt ? 6 : gpu_hash_words(_gpu_op);
-        int stride = is_md5crypt ? 6
-            : is_bcrypt ? 9
-            : (_max_iter > 1 || cat == GPU_CAT_ITER || cat == GPU_CAT_SALTPASS)
-                ? (3 + hw) : (2 + hw);
-        clEnqueueReadBuffer(d->queue, d->b_hits, CL_TRUE, 0, raw_nhits * stride * sizeof(uint32_t), d->h_hits, 0, NULL, NULL);
+        clEnqueueReadBuffer(d->queue, d->b_hits, CL_TRUE, 0, raw_nhits * GPU_HIT_STRIDE * sizeof(uint32_t), d->h_hits, 0, NULL, NULL);
     }
     return d->h_hits;
 }

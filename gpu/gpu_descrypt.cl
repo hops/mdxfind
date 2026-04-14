@@ -209,17 +209,6 @@ __kernel void descrypt_batch(
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base = slot * 7;
-            hits[base]   = word_idx;
-            hits[base+1] = salt_idx;
-            hits[base+2] = 1;
-            hits[base+3] = l;
-            hits[base+4] = r;
-            hits[base+5] = 0;
-            hits[base+6] = 0;
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        EMIT_HIT_4(hits, hit_count, params.max_hits, word_idx, salt_idx, 1, l, r, 0, 0)
     }
 }

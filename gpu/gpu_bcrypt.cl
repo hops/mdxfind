@@ -634,19 +634,6 @@ void bcrypt_batch(
             hash_data_buf, hash_data_off,
             overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count))
     {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base = slot * 9;
-            hits[base]     = word_idx;
-            hits[base + 1] = salt_idx;
-            hits[base + 2] = 1;
-            hits[base + 3] = out[0];
-            hits[base + 4] = out[1];
-            hits[base + 5] = out[2];
-            hits[base + 6] = out[3];
-            hits[base + 7] = out[4];
-            hits[base + 8] = out[5];
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        EMIT_HIT_6(hits, hit_count, params.max_hits, word_idx, salt_idx, 1, out)
     }
 }

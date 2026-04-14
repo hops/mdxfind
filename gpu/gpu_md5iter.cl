@@ -40,14 +40,7 @@ __kernel void md5_iter_lc(
                           params.compact_mask, params.max_probe, params.hash_data_count,
                           hash_data_buf, hash_data_off,
                           overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-            uint slot = atomic_add(hit_count, 1u);
-            if (slot < params.max_hits) {
-                uint base = slot * 7;
-                hits[base] = tid; hits[base+1] = 0;
-                hits[base+2] = iter + 1; /* +1: GPU iter 1 = mdxfind iter 2 */
-                hits[base+3] = hx; hits[base+4] = hy;
-                hits[base+5] = hz; hits[base+6] = hw;
-            }
+            EMIT_HIT_4(hits, hit_count, params.max_hits, tid, 0, iter + 1, hx, hy, hz, hw)
         }
 
         if (iter < params.max_iter) {
@@ -89,14 +82,7 @@ __kernel void md5_iter_uc(
                           params.compact_mask, params.max_probe, params.hash_data_count,
                           hash_data_buf, hash_data_off,
                           overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-            uint slot = atomic_add(hit_count, 1u);
-            if (slot < params.max_hits) {
-                uint base = slot * 7;
-                hits[base] = tid; hits[base+1] = 0;
-                hits[base+2] = iter + 1; /* +1: GPU iter 1 = mdxfind iter 2 */
-                hits[base+3] = hx; hits[base+4] = hy;
-                hits[base+5] = hz; hits[base+6] = hw;
-            }
+            EMIT_HIT_4(hits, hit_count, params.max_hits, tid, 0, iter + 1, hx, hy, hz, hw)
         }
 
         if (iter < params.max_iter) {

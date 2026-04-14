@@ -59,13 +59,7 @@ __kernel void sha1passsalt_batch(
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base = slot * 8;
-            hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
-            for (int i = 0; i < 5; i++) hits[base+3+i] = h[i];
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        EMIT_HIT_5(hits, hit_count, params.max_hits, word_idx, salt_idx, 1, h)
     }
 }
 
@@ -128,13 +122,7 @@ __kernel void sha1saltpass_batch(
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base = slot * 8;
-            hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
-            for (int i = 0; i < 5; i++) hits[base+3+i] = h[i];
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        EMIT_HIT_5(hits, hit_count, params.max_hits, word_idx, salt_idx, 1, h)
     }
 }
 
@@ -260,13 +248,7 @@ __kernel void sha1dru_batch(
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base = slot * 8;
-            hits[base] = tid; hits[base+1] = 0; hits[base+2] = 1;
-            for (int i = 0; i < 5; i++) hits[base+3+i] = h[i];
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        EMIT_HIT_5(hits, hit_count, params.max_hits, tid, 0, 1, h)
     }
 }
 
@@ -399,13 +381,7 @@ __kernel void hmac_sha1_ksalt_batch(
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base = slot * 8;
-            hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
-            for (int i = 0; i < 5; i++) hits[base+3+i] = h[i];
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        EMIT_HIT_5(hits, hit_count, params.max_hits, word_idx, salt_idx, 1, h)
     }
 }
 
@@ -511,12 +487,6 @@ __kernel void hmac_sha1_kpass_batch(
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base = slot * 8;
-            hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
-            for (int i = 0; i < 5; i++) hits[base+3+i] = h[i];
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        EMIT_HIT_5(hits, hit_count, params.max_hits, word_idx, salt_idx, 1, h)
     }
 }

@@ -124,9 +124,7 @@ __kernel void sha512_unsalted_batch(
     sha512_block(state, M);
 
     uint max_iter = params.max_iter;
-    /* SHA512: 16 hash words (8 x uint64 -> 16 x uint32).
-     * hit_stride = 2 + 16 = 18, or 3 + 16 = 19 with iter */
-    uint hit_stride = (max_iter > 1) ? 19 : 18;
+    /* SHA512: 16 hash words (8 x uint64 -> 16 x uint32). */
 
     for (uint iter = 1; iter <= max_iter; iter++) {
         /* Byte-swap all 8 state words to LE, split into 16 uint32 */
@@ -141,16 +139,7 @@ __kernel void sha512_unsalted_batch(
                           params.compact_mask, params.max_probe, params.hash_data_count,
                           hash_data_buf, hash_data_off,
                           overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-            uint slot = atomic_add(hit_count, 1u);
-            if (slot < params.max_hits) {
-                uint base = slot * hit_stride;
-                hits[base]   = word_idx;
-                hits[base+1] = mask_idx;
-                int offset = 2;
-                if (max_iter > 1) { hits[base+2] = iter; offset = 3; }
-                for (int i = 0; i < 16; i++) hits[base+offset+i] = h[i];
-                mem_fence(CLK_GLOBAL_MEM_FENCE);
-            }
+            EMIT_HIT_16(hits, hit_count, params.max_hits, word_idx, mask_idx, 1u, h)
         }
         if (iter < max_iter) {
             /* Hex-encode 8 BE state words into M[0..15] (128 hex chars = full block) */
@@ -282,14 +271,7 @@ __kernel void sha384_unsalted_batch(
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base = slot * 14;  /* 2 + 12 */
-            hits[base]   = word_idx;
-            hits[base+1] = mask_idx;
-            for (int i = 0; i < 12; i++) hits[base+2+i] = h[i];
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        EMIT_HIT_12(hits, hit_count, params.max_hits, word_idx, mask_idx, 1u, h)
     }
 }
 
@@ -398,8 +380,6 @@ __kernel void sha384raw_unsalted_batch(
     M[15] = 384;  /* 48 bytes * 8 bits */
 
     uint max_iter = params.max_iter;
-    /* SHA384RAW: 12 hash words. hit_stride = 2 + 12 = 14, or 3 + 12 = 15 with iter */
-    uint hit_stride = (max_iter > 1) ? 15 : 14;
 
     for (uint iter = 1; iter <= max_iter; iter++) {
         uint h[12];
@@ -413,16 +393,7 @@ __kernel void sha384raw_unsalted_batch(
                           params.compact_mask, params.max_probe, params.hash_data_count,
                           hash_data_buf, hash_data_off,
                           overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-            uint slot = atomic_add(hit_count, 1u);
-            if (slot < params.max_hits) {
-                uint base = slot * hit_stride;
-                hits[base]   = word_idx;
-                hits[base+1] = mask_idx;
-                int offset = 2;
-                if (max_iter > 1) { hits[base+2] = iter; offset = 3; }
-                for (int i = 0; i < 12; i++) hits[base+offset+i] = h[i];
-                mem_fence(CLK_GLOBAL_MEM_FENCE);
-            }
+            EMIT_HIT_12(hits, hit_count, params.max_hits, word_idx, mask_idx, 1u, h)
         }
         if (iter < max_iter) {
             for (int i = 0; i < 6; i++) M[i] = state[i];
@@ -539,8 +510,6 @@ __kernel void sha512raw_unsalted_batch(
     M[15] = 512;  /* 64 bytes * 8 bits */
 
     uint max_iter = params.max_iter;
-    /* SHA512RAW: 16 hash words. hit_stride = 2 + 16 = 18, or 3 + 16 = 19 with iter */
-    uint hit_stride = (max_iter > 1) ? 19 : 18;
 
     for (uint iter = 1; iter <= max_iter; iter++) {
         uint h[16];
@@ -554,16 +523,7 @@ __kernel void sha512raw_unsalted_batch(
                           params.compact_mask, params.max_probe, params.hash_data_count,
                           hash_data_buf, hash_data_off,
                           overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-            uint slot = atomic_add(hit_count, 1u);
-            if (slot < params.max_hits) {
-                uint base = slot * hit_stride;
-                hits[base]   = word_idx;
-                hits[base+1] = mask_idx;
-                int offset = 2;
-                if (max_iter > 1) { hits[base+2] = iter; offset = 3; }
-                for (int i = 0; i < 16; i++) hits[base+offset+i] = h[i];
-                mem_fence(CLK_GLOBAL_MEM_FENCE);
-            }
+            EMIT_HIT_16(hits, hit_count, params.max_hits, word_idx, mask_idx, 1u, h)
         }
         if (iter < max_iter) {
             for (int i = 0; i < 8; i++) M[i] = state[i];

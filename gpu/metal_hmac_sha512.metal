@@ -45,9 +45,10 @@
                 device const uint *_ref = (device const uint *)(hash_data_buf + _off); \
                 if (_h384[0]==_ref[0] && _h384[1]==_ref[1] && _h384[2]==_ref[2] && _h384[3]==_ref[3]) { \
                     uint _slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed); \
-                    if (_slot < params.max_hits) { uint _base = _slot * 15; \
+                    if (_slot < params.max_hits) { uint _base = _slot * 19; \
                         hits[_base] = word_idx; hits[_base+1] = salt_idx; hits[_base+2] = 1; \
-                        for (int _i2=0;_i2<12;_i2++) hits[_base+3+_i2]=_h384[_i2]; } return; } } } \
+                        for (int _i2=0;_i2<12;_i2++) hits[_base+3+_i2]=_h384[_i2];
+                        for (uint _z=15;_z<19;_z++) hits[_base+_z]=0; } return; } } } \
         _pos = (_pos + 1) & params.compact_mask; } }
 
 /* HMAC core: prepares key_block, runs inner+outer hash, probes.

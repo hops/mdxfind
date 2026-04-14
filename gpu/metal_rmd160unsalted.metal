@@ -153,7 +153,9 @@ kernel void rmd160_unsalted_batch(
     if (found) {
         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
         if (slot < params.max_hits) {
-            uint base = slot * 7;  /* 2 + 5 */
+            uint base = slot * HIT_STRIDE;
             hits[base] = word_idx; hits[base+1] = mask_idx;
-            for (int i = 0; i < 5; i++) hits[base+2+i] = h[i]; } }
+            hits[base+2] = 1;
+            for (int i = 0; i < 5; i++) hits[base+3+i] = h[i];
+            for (uint _z = 8; _z < HIT_STRIDE; _z++) hits[base+_z] = 0; } }
 }

@@ -660,7 +660,7 @@ kernel void bcrypt_batch(
     if (found) {
         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
         if (slot < params.max_hits) {
-            uint base = slot * 9;
+            uint base = slot * HIT_STRIDE;
             hits[base]     = word_idx;
             hits[base + 1] = salt_idx;
             hits[base + 2] = 1;
@@ -670,6 +670,7 @@ kernel void bcrypt_batch(
             hits[base + 6] = out[3];
             hits[base + 7] = out[4];
             hits[base + 8] = out[5];
+            for (uint _z = 9; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
         }
     }
 }

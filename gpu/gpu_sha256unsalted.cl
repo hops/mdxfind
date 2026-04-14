@@ -133,8 +133,6 @@ __kernel void sha256_unsalted_batch(
     sha256_compress(state, M);
 
     uint max_iter = params.max_iter;
-    /* SHA256: 8 hash words. hit_stride = 2 + 8 = 10, or 3 + 8 = 11 with iter */
-    uint hit_stride = (max_iter > 1) ? 11 : 10;
 
     for (uint iter = 1; iter <= max_iter; iter++) {
         uint h[8];
@@ -144,16 +142,7 @@ __kernel void sha256_unsalted_batch(
                           params.compact_mask, params.max_probe, params.hash_data_count,
                           hash_data_buf, hash_data_off,
                           overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-            uint slot = atomic_add(hit_count, 1u);
-            if (slot < params.max_hits) {
-                uint base = slot * hit_stride;
-                hits[base]   = word_idx;
-                hits[base+1] = mask_idx;
-                int offset = 2;
-                if (max_iter > 1) { hits[base+2] = iter; offset = 3; }
-                for (int i = 0; i < 8; i++) hits[base+offset+i] = h[i];
-                mem_fence(CLK_GLOBAL_MEM_FENCE);
-            }
+            EMIT_HIT_8(hits, hit_count, params.max_hits, word_idx, mask_idx, 1u, h)
         }
         if (iter < max_iter) {
             /* Hex-encode 8 BE state words into M[0..15] (64 hex chars = full block) */
@@ -276,14 +265,7 @@ __kernel void sha224_unsalted_batch(
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base = slot * 9;  /* 2 + 7 */
-            hits[base]   = word_idx;
-            hits[base+1] = mask_idx;
-            for (int i = 0; i < 7; i++) hits[base+2+i] = h[i];
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        EMIT_HIT_7(hits, hit_count, params.max_hits, word_idx, mask_idx, 1u, h)
     }
 }
 
@@ -396,8 +378,6 @@ __kernel void sha256raw_unsalted_batch(
     M[15] = 256;  /* 32 bytes * 8 bits */
 
     uint max_iter = params.max_iter;
-    /* SHA256RAW: 8 hash words. hit_stride = 2 + 8 = 10, or 3 + 8 = 11 with iter */
-    uint hit_stride = (max_iter > 1) ? 11 : 10;
 
     for (uint iter = 1; iter <= max_iter; iter++) {
 
@@ -408,16 +388,7 @@ __kernel void sha256raw_unsalted_batch(
                           params.compact_mask, params.max_probe, params.hash_data_count,
                           hash_data_buf, hash_data_off,
                           overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-            uint slot = atomic_add(hit_count, 1u);
-            if (slot < params.max_hits) {
-                uint base = slot * hit_stride;
-                hits[base]   = word_idx;
-                hits[base+1] = mask_idx;
-                int offset = 2;
-                if (max_iter > 1) { hits[base+2] = iter; offset = 3; }
-                for (int i = 0; i < 8; i++) hits[base+offset+i] = h[i];
-                mem_fence(CLK_GLOBAL_MEM_FENCE);
-            }
+            EMIT_HIT_8(hits, hit_count, params.max_hits, word_idx, mask_idx, 1u, h)
         }
         if (iter < max_iter) {
             for (int i = 0; i < 8; i++) M[i] = state[i];

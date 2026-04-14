@@ -7,6 +7,8 @@
 #include <metal_stdlib>
 using namespace metal;
 
+constant uint HIT_STRIDE = 19;
+
 struct MetalParams {
     uint64_t compact_mask;
     uint     num_words;
@@ -159,17 +161,15 @@ static void __attribute__((noinline)) sha512_probe_emit(
                 break; } } }
     if (found) {
         uint slot = atomic_fetch_add_explicit(hit_count, 1u, memory_order_relaxed);
-        int stride = (max_iter > 1) ? (3 + nwords) : (2 + nwords);
         if (slot < max_hits) {
-            uint base = slot * stride;
-            hits[base] = word_idx; hits[base+1] = mask_idx;
-            int off2 = 2;
-            if (max_iter > 1) { hits[base+2] = iter; off2 = 3; }
+            uint base = slot * HIT_STRIDE;
+            hits[base] = word_idx; hits[base+1] = mask_idx; hits[base+2] = iter;
             for (int i = 0; i < nwords / 2; i++) {
                 ulong sw = bswap64(state[i]);
-                hits[base+off2+i*2] = (uint)sw;
-                hits[base+off2+i*2+1] = (uint)(sw >> 32);
+                hits[base+3+i*2] = (uint)sw;
+                hits[base+3+i*2+1] = (uint)(sw >> 32);
             }
+            for (uint _z = 3 + nwords; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
         }
     }
 }

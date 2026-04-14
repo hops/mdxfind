@@ -455,10 +455,13 @@ static void sha1_to_hex_lc(thread uint *state, thread uint *M) {
 
 /* ---- Compact table probe + overflow search macros ---- */
 
-/* PROBE6: 4-word hash comparison, stride 6 hit recording.
+/* Universal hit entry stride: [0]=widx [1]=sidx [2]=iter [3..18]=hash[0..15] */
+constant uint HIT_STRIDE = 19;
+
+/* PROBE6: 4-word hash comparison, stride 19 hit recording.
  * h = uint4 with hash words, widx/sidx = word/salt indices.
  * Searches compact table + overflow, emits hit as:
- *   hits[base+0]=widx, [1]=sidx, [2]=h.x, [3]=h.y, [4]=h.z, [5]=h.w */
+ *   hits[base+0]=widx, [1]=sidx, [2]=1, [3..6]=hash, [7..18]=0 */
 #define PROBE6(h, widx, sidx) { \
     ulong key = (ulong(h.y) << 32) | h.x; \
     uint fp = uint(key >> 32); if (fp == 0) fp = 1; \
@@ -494,10 +497,11 @@ static void sha1_to_hex_lc(thread uint *state, thread uint *M) {
     if (found) { \
         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed); \
         if (slot < params.max_hits) { \
-            uint base = slot * 6; \
-            hits[base] = widx; hits[base+1] = sidx; \
-            hits[base+2] = h.x; hits[base+3] = h.y; \
-            hits[base+4] = h.z; hits[base+5] = h.w; } } }
+            uint base = slot * HIT_STRIDE; \
+            hits[base] = widx; hits[base+1] = sidx; hits[base+2] = 1; \
+            hits[base+3] = h.x; hits[base+4] = h.y; \
+            hits[base+5] = h.z; hits[base+6] = h.w; \
+            for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0; } } }
 
 /* PROBE6_NOOVF: Same as PROBE6 but without overflow search */
 #define PROBE6_NOOVF(h, widx, sidx) { \
@@ -519,12 +523,13 @@ static void sha1_to_hex_lc(thread uint *state, thread uint *M) {
     if (found) { \
         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed); \
         if (slot < params.max_hits) { \
-            uint base = slot * 6; \
-            hits[base] = widx; hits[base+1] = sidx; \
-            hits[base+2] = h.x; hits[base+3] = h.y; \
-            hits[base+4] = h.z; hits[base+5] = h.w; } } }
+            uint base = slot * HIT_STRIDE; \
+            hits[base] = widx; hits[base+1] = sidx; hits[base+2] = 1; \
+            hits[base+3] = h.x; hits[base+4] = h.y; \
+            hits[base+5] = h.z; hits[base+6] = h.w; \
+            for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0; } } }
 
-/* PROBE7: stride 7, emits iter_num=1 at [2] then 4 hash words at [3..6] */
+/* PROBE7: stride 19, emits iter_num=1 at [2] then 4 hash words at [3..6], zero-pad rest */
 #define PROBE7(h, widx, sidx) { \
     ulong key = (ulong(h.y) << 32) | h.x; \
     uint fp = uint(key >> 32); if (fp == 0) fp = 1; \
@@ -560,14 +565,15 @@ static void sha1_to_hex_lc(thread uint *state, thread uint *M) {
     if (found) { \
         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed); \
         if (slot < params.max_hits) { \
-            uint base = slot * 7; \
+            uint base = slot * HIT_STRIDE; \
             hits[base] = widx; hits[base+1] = sidx; hits[base+2] = 1; \
             hits[base+3] = h.x; hits[base+4] = h.y; \
-            hits[base+5] = h.z; hits[base+6] = h.w; } } }
+            hits[base+5] = h.z; hits[base+6] = h.w; \
+            for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0; } } }
 
-/* PROBE8: stride 8, for SHA1 (5-word hash in uint array h[]).
+/* PROBE8: stride 19, for SHA1 (5-word hash in uint array h[]).
  * h[] must be 5-element array of bswapped (LE) hash words.
- * Comparison uses first 4 words; all 5 stored in hit. */
+ * Comparison uses first 4 words; all 5 stored in hit, rest zero-padded. */
 #define PROBE8(h, widx, sidx) { \
     ulong key = (ulong(h[1]) << 32) | h[0]; \
     uint fp = h[1]; if (fp == 0) fp = 1; \
@@ -603,32 +609,37 @@ static void sha1_to_hex_lc(thread uint *state, thread uint *M) {
     if (found) { \
         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed); \
         if (slot < params.max_hits) { \
-            uint base = slot * 8; \
+            uint base = slot * HIT_STRIDE; \
             hits[base] = widx; hits[base+1] = sidx; hits[base+2] = 1; \
-            for (int i = 0; i < 5; i++) hits[base+3+i] = h[i]; } } }
+            for (int i = 0; i < 5; i++) hits[base+3+i] = h[i]; \
+            for (uint _z = 8; _z < HIT_STRIDE; _z++) hits[base+_z] = 0; } } }
 
 /* compact_mix: XOR-fold first 8 hash bytes */
 uint64_t compact_mix(uint64_t k) {
     return k ^ (k >> 32);
 }
 
+/* GPU Params: 128-byte uniform API. uint64 first, then uint32, then reserved.
+ * Must match host-side MetalParams/OCLParams exactly. */
 struct MetalParams {
-    uint64_t compact_mask;
-    uint     num_words;
-    uint     num_salts;
-    uint     salt_start;
-    uint     max_probe;
-    uint     hash_data_count;
-    uint     max_hits;
-    uint     overflow_count;
-    uint     max_iter;
-    uint     num_masks;     /* mask combinations per chunk (0 = not mask mode) */
-    uint64_t mask_start;    /* offset for mask chunking (64-bit for >4B keyspaces) */
-    uint     n_prepend;     /* number of prepend mask positions */
-    uint     n_append;      /* number of append mask positions */
-    uint     iter_count;    /* PHPBB3: uniform iteration count for this dispatch group */
-    uint64_t mask_base0;   /* pre-decomposed mask_start: positions 0-7 packed as bytes */
-    uint64_t mask_base1;   /* positions 8-15 packed as bytes */
+    uint64_t compact_mask;    /*  0: hash table mask */
+    uint64_t mask_start;      /*  8: mask keyspace offset */
+    uint64_t mask_base0;      /* 16: pre-decomposed positions 0-7 */
+    uint64_t mask_base1;      /* 24: pre-decomposed positions 8-15 */
+    uint     num_words;       /* 32: words in batch */
+    uint     num_salts;       /* 36: salts for dispatch */
+    uint     salt_start;      /* 40: starting salt index */
+    uint     max_probe;       /* 44: compact table probe depth */
+    uint     hash_data_count; /* 48: hash_data entries */
+    uint     max_hits;        /* 52: hit buffer capacity */
+    uint     overflow_count;  /* 56: overflow table entries */
+    uint     max_iter;        /* 60: iteration count (-i) */
+    uint     num_masks;       /* 64: mask combinations per chunk */
+    uint     n_prepend;       /* 68: prepend mask positions (-N) */
+    uint     n_append;        /* 72: append mask positions (-n) */
+    uint     iter_count;      /* 76: per-dispatch iteration (PHPBB3) */
+    uint     reserved32[4];   /* 80-95: reserved */
+    uint64_t reserved64[4];   /* 96-127: reserved */
 };
 
 /* Hex-encode 4 uint32 hash to 32 bytes in M[0..7] for iteration */
@@ -647,7 +658,7 @@ static inline void hash_to_hex_M(uint4 h, thread uint *M) {
 
 /* ---- PROBE variants: no-overflow with early return ---- */
 
-/* PROBE7_NOOVF: stride 7, compact-only probe with early return.
+/* PROBE7_NOOVF: stride 19, compact-only probe with early return.
  * For HMAC kernels where overflow search is not needed. */
 #define PROBE7_NOOVF(h, widx, sidx) { \
     ulong key = (ulong(h.y) << 32) | h.x; \
@@ -661,14 +672,15 @@ static inline void hash_to_hex_M(uint4 h, thread uint *M) {
                 device const uint *ref = (device const uint *)(hash_data_buf + off); \
                 if (h.x == ref[0] && h.y == ref[1] && h.z == ref[2] && h.w == ref[3]) { \
                     uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed); \
-                    if (slot < params.max_hits) { uint base = slot * 7; \
+                    if (slot < params.max_hits) { uint base = slot * HIT_STRIDE; \
                         hits[base] = widx; hits[base+1] = sidx; hits[base+2] = 1; \
                         hits[base+3] = h.x; hits[base+4] = h.y; \
-                        hits[base+5] = h.z; hits[base+6] = h.w; } return; \
+                        hits[base+5] = h.z; hits[base+6] = h.w; \
+                        for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0; } return; \
                 } } } \
         pos = (pos + 1) & params.compact_mask; } }
 
-/* PROBE11_NOOVF: stride 11, compact-only probe with early return.
+/* PROBE11_NOOVF: stride 19, compact-only probe with early return.
  * For SHA256-based HMAC that stores all 8 hash words in the hit. */
 #define PROBE11_NOOVF(h0,h1,h2,h3,h_arr,widx,sidx) { \
     uint4 hh = uint4(h0,h1,h2,h3); ulong key = (ulong(hh.y) << 32) | hh.x; \
@@ -679,9 +691,10 @@ static inline void hash_to_hex_M(uint4 h, thread uint *M) {
             ulong off = hash_data_off[idx]; device const uint *ref = (device const uint *)(hash_data_buf + off); \
             if (hh.x == ref[0] && hh.y == ref[1] && hh.z == ref[2] && hh.w == ref[3]) { \
                 uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed); \
-                if (slot < params.max_hits) { uint base = slot * 11; \
+                if (slot < params.max_hits) { uint base = slot * HIT_STRIDE; \
                     hits[base] = widx; hits[base+1] = sidx; hits[base+2] = 1; \
-                    for (int ii = 0; ii < 8; ii++) hits[base+3+ii] = h_arr[ii]; } return; \
+                    for (int ii = 0; ii < 8; ii++) hits[base+3+ii] = h_arr[ii]; \
+                    for (uint _z = 11; _z < HIT_STRIDE; _z++) hits[base+_z] = 0; } return; \
             } } } pos = (pos + 1) & params.compact_mask; } }
 
 /* ---- SHA256 block function ---- */

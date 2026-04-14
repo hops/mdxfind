@@ -977,10 +977,10 @@ kernel void streebog256_unsalted_batch(
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
         if (slot < params.max_hits) {
-            uint base = slot * 10;  /* 2 + 8 */
-            hits[base] = word_idx; hits[base+1] = mask_idx;
-            for (int i = 0; i < 8; i++) hits[base+2+i] = hh[i];
-
+            uint base = slot * HIT_STRIDE;
+            hits[base] = word_idx; hits[base+1] = mask_idx; hits[base+2] = 1;
+            for (int i = 0; i < 8; i++) hits[base+3+i] = hh[i];
+            for (uint _z = 11; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
         }
     }
 }
@@ -1099,10 +1099,9 @@ kernel void streebog512_unsalted_batch(
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
         if (slot < params.max_hits) {
-            uint base = slot * 18;  /* 2 + 16 */
-            hits[base] = word_idx; hits[base+1] = mask_idx;
-            for (int i = 0; i < 16; i++) hits[base+2+i] = hh[i];
-
+            uint base = slot * HIT_STRIDE;
+            hits[base] = word_idx; hits[base+1] = mask_idx; hits[base+2] = 1;
+            for (int i = 0; i < 16; i++) hits[base+3+i] = hh[i];
         }
     }
 }
@@ -1181,11 +1180,11 @@ kernel void hmac_streebog256_kpass_batch(
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
         if (slot < params.max_hits) {
-            uint base = slot * 7;
+            uint base = slot * HIT_STRIDE;
             hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
             hits[base+3] = hx; hits[base+4] = hy;
             hits[base+5] = hz; hits[base+6] = hw;
-            
+            for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
         }
     }
 }
@@ -1264,11 +1263,11 @@ kernel void hmac_streebog256_ksalt_batch(
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
         if (slot < params.max_hits) {
-            uint base = slot * 7;
+            uint base = slot * HIT_STRIDE;
             hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
             hits[base+3] = hx; hits[base+4] = hy;
             hits[base+5] = hz; hits[base+6] = hw;
-            
+            for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
         }
     }
 }
@@ -1347,11 +1346,11 @@ kernel void hmac_streebog512_kpass_batch(
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
         if (slot < params.max_hits) {
-            uint base = slot * 7;
+            uint base = slot * HIT_STRIDE;
             hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
             hits[base+3] = hx; hits[base+4] = hy;
             hits[base+5] = hz; hits[base+6] = hw;
-            
+            for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
         }
     }
 }
@@ -1430,11 +1429,11 @@ kernel void hmac_streebog512_ksalt_batch(
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
         if (slot < params.max_hits) {
-            uint base = slot * 7;
+            uint base = slot * HIT_STRIDE;
             hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
             hits[base+3] = hx; hits[base+4] = hy;
             hits[base+5] = hz; hits[base+6] = hw;
-            
+            for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
         }
     }
 }

@@ -111,28 +111,13 @@ __kernel void md5_unsalted_batch(
 
     /* Probe compact table at iteration 1 and emit hit */
     uint max_iter = params.max_iter;
-    uint hit_stride = (max_iter > 1) ? 7 : 6;
 
     for (uint iter = 1; iter <= max_iter; iter++) {
         if (probe_compact(hx, hy, hz, hw, compact_fp, compact_idx,
                           params.compact_mask, params.max_probe, params.hash_data_count,
                           hash_data_buf, hash_data_off,
                           overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-            uint slot = atomic_add(hit_count, 1u);
-            if (slot < params.max_hits) {
-                uint base = slot * hit_stride;
-                hits[base]   = word_idx;
-                hits[base+1] = mask_idx;
-                if (hit_stride == 7) {
-                    hits[base+2] = iter;
-                    hits[base+3] = hx; hits[base+4] = hy;
-                    hits[base+5] = hz; hits[base+6] = hw;
-                } else {
-                    hits[base+2] = hx; hits[base+3] = hy;
-                    hits[base+4] = hz; hits[base+5] = hw;
-                }
-                mem_fence(CLK_GLOBAL_MEM_FENCE);
-            }
+            EMIT_HIT_4(hits, hit_count, params.max_hits, word_idx, mask_idx, 1u, hx, hy, hz, hw)
         }
         if (iter < max_iter) {
             /* Hex-encode hash into M[0..7], set up constant padding */
@@ -212,7 +197,6 @@ __kernel void md5raw_unsalted_batch(
     M[14] = 128; M[15] = 0;  /* 16 bytes = 128 bits */
 
     uint max_iter = params.max_iter;
-    uint hit_stride = (max_iter > 1) ? 7 : 6;
 
     for (uint iter = 1; iter <= max_iter; iter++) {
         /* Binary re-hash: md5(previous_hash_binary) */
@@ -224,21 +208,7 @@ __kernel void md5raw_unsalted_batch(
                           params.compact_mask, params.max_probe, params.hash_data_count,
                           hash_data_buf, hash_data_off,
                           overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-            uint slot = atomic_add(hit_count, 1u);
-            if (slot < params.max_hits) {
-                uint base = slot * hit_stride;
-                hits[base]   = word_idx;
-                hits[base+1] = mask_idx;
-                if (hit_stride == 7) {
-                    hits[base+2] = iter;
-                    hits[base+3] = hx; hits[base+4] = hy;
-                    hits[base+5] = hz; hits[base+6] = hw;
-                } else {
-                    hits[base+2] = hx; hits[base+3] = hy;
-                    hits[base+4] = hz; hits[base+5] = hw;
-                }
-                mem_fence(CLK_GLOBAL_MEM_FENCE);
-            }
+            EMIT_HIT_4(hits, hit_count, params.max_hits, word_idx, mask_idx, 1u, hx, hy, hz, hw)
         }
     }
 }

@@ -172,7 +172,6 @@ kernel void md4_unsalted_batch(
     md4_compress(&hx, &hy, &hz, &hw, M);
 
     uint max_iter = params.max_iter;
-    uint hit_stride = (max_iter > 1) ? 7 : 6;
 
     for (uint iter = 1; iter <= max_iter; iter++) {
         uint4 h = uint4(hx, hy, hz, hw);
@@ -220,16 +219,11 @@ kernel void md4_unsalted_batch(
         if (found) {
             uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
             if (slot < params.max_hits) {
-                uint base = slot * hit_stride;
-                hits[base] = word_idx; hits[base+1] = mask_idx;
-                if (hit_stride == 7) {
-                    hits[base+2] = iter;
-                    hits[base+3] = h.x; hits[base+4] = h.y;
-                    hits[base+5] = h.z; hits[base+6] = h.w;
-                } else {
-                    hits[base+2] = h.x; hits[base+3] = h.y;
-                    hits[base+4] = h.z; hits[base+5] = h.w;
-                }
+                uint base = slot * HIT_STRIDE;
+                hits[base] = word_idx; hits[base+1] = mask_idx; hits[base+2] = iter;
+                hits[base+3] = h.x; hits[base+4] = h.y;
+                hits[base+5] = h.z; hits[base+6] = h.w;
+                for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
             }
         }
         if (iter < max_iter) {
@@ -345,7 +339,6 @@ kernel void md4utf16_unsalted_batch(
     md4_compress(&hx, &hy, &hz, &hw, M);
 
     uint max_iter = params.max_iter;
-    uint hit_stride = (max_iter > 1) ? 7 : 6;
 
     for (uint iter = 1; iter <= max_iter; iter++) {
         uint4 h = uint4(hx, hy, hz, hw);
@@ -393,16 +386,11 @@ kernel void md4utf16_unsalted_batch(
         if (found) {
             uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
             if (slot < params.max_hits) {
-                uint base = slot * hit_stride;
-                hits[base] = word_idx; hits[base+1] = mask_idx;
-                if (hit_stride == 7) {
-                    hits[base+2] = iter;
-                    hits[base+3] = h.x; hits[base+4] = h.y;
-                    hits[base+5] = h.z; hits[base+6] = h.w;
-                } else {
-                    hits[base+2] = h.x; hits[base+3] = h.y;
-                    hits[base+4] = h.z; hits[base+5] = h.w;
-                }
+                uint base = slot * HIT_STRIDE;
+                hits[base] = word_idx; hits[base+1] = mask_idx; hits[base+2] = iter;
+                hits[base+3] = h.x; hits[base+4] = h.y;
+                hits[base+5] = h.z; hits[base+6] = h.w;
+                for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
             }
         }
         if (iter < max_iter) {

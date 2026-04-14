@@ -225,24 +225,31 @@ static struct gpu_slot {
 } gpu_slots[GPU_NUM_SLOTS];
 static int gpu_slots_ready = 0;
 
-/* ---- Params buffer ---- */
+/* ---- GPU Params struct: 128-byte uniform API (must match kernel) ----
+ * All uint64 fields first (8-aligned), then uint32 fields, then reserved.
+ * Identical layout for OpenCL and Metal. No padding holes. */
 typedef struct {
-    uint64_t compact_mask;
-    uint32_t num_words;
-    uint32_t num_salts;
-    uint32_t salt_start;
-    uint32_t max_probe;
-    uint32_t hash_data_count;
-    uint32_t max_hits;
-    uint32_t overflow_count;
-    uint32_t max_iter;
-    uint32_t num_masks;
-    uint64_t mask_start;
-    uint32_t n_prepend;
-    uint32_t n_append;
-    uint32_t iter_count;   /* PHPBB3: uniform iteration count for this dispatch group */
-    uint64_t mask_base0;   /* pre-decomposed mask_start: positions 0-7 packed as bytes */
-    uint64_t mask_base1;   /* positions 8-15 packed as bytes */
+    /* 8-byte fields (offset 0-31) */
+    uint64_t compact_mask;    /*  0: hash table mask */
+    uint64_t mask_start;      /*  8: mask keyspace offset for chunking */
+    uint64_t mask_base0;      /* 16: pre-decomposed mask_start positions 0-7 */
+    uint64_t mask_base1;      /* 24: pre-decomposed mask_start positions 8-15 */
+    /* 4-byte fields (offset 32-79) */
+    uint32_t num_words;       /* 32: words in this batch */
+    uint32_t num_salts;       /* 36: salts for this dispatch */
+    uint32_t salt_start;      /* 40: starting salt index */
+    uint32_t max_probe;       /* 44: compact table max probe depth */
+    uint32_t hash_data_count; /* 48: entries in hash_data */
+    uint32_t max_hits;        /* 52: hit buffer capacity */
+    uint32_t overflow_count;  /* 56: overflow table entries */
+    uint32_t max_iter;        /* 60: iteration count from -i */
+    uint32_t num_masks;       /* 64: mask combinations per chunk */
+    uint32_t n_prepend;       /* 68: prepend mask positions (-N) */
+    uint32_t n_append;        /* 72: append mask positions (-n) */
+    uint32_t iter_count;      /* 76: per-dispatch iteration count (PHPBB3) */
+    /* Reserved (offset 80-127) */
+    uint32_t reserved32[4];   /* 80-95: reserved uint32 */
+    uint64_t reserved64[4];   /* 96-127: reserved uint64 */
 } MetalParams;
 
 static int _max_iter = 1;
@@ -375,7 +382,7 @@ int gpu_metal_init(void) {
         }
 
         /* Allocate persistent hit buffers */
-        buf_hits = [mtl_device newBufferWithLength:MAX_GPU_HITS * 2 * sizeof(uint32_t)
+        buf_hits = [mtl_device newBufferWithLength:MAX_GPU_HITS * GPU_HIT_STRIDE * sizeof(uint32_t)
                                            options:MTLResourceStorageModeShared];
         buf_hit_count = [mtl_device newBufferWithLength:sizeof(uint32_t)
                                                 options:MTLResourceStorageModeShared];
@@ -567,10 +574,10 @@ int gpu_metal_set_salts(
         memcpy([buf_salt_len contents], salt_lens, num_salts * sizeof(uint16_t));
         _salts_count = num_salts;
 
-        /* Size hit buffer for chunk dispatch — 5 uint32s per hit */
+        /* Hit buffer: 19 uint32 words per hit (universal stride) */
         #define GPU_MAX_HITS 32768
         _max_hits = GPU_MAX_HITS;
-        buf_dispatch_hits = [mtl_device newBufferWithLength:_max_hits * 19 * sizeof(uint32_t)
+        buf_dispatch_hits = [mtl_device newBufferWithLength:_max_hits * GPU_HIT_STRIDE * sizeof(uint32_t)
                                                     options:MTLResourceStorageModeShared];
         *(uint32_t *)[buf_dispatch_hit_count contents] = 0;
 
@@ -763,7 +770,7 @@ uint32_t *gpu_metal_dispatch_batch(
             #define GPU_MAX_HITS 32768
             _max_hits = GPU_MAX_HITS;
             if (!buf_dispatch_hits)
-                buf_dispatch_hits = [mtl_device newBufferWithLength:_max_hits * 19 * sizeof(uint32_t)
+                buf_dispatch_hits = [mtl_device newBufferWithLength:_max_hits * GPU_HIT_STRIDE * sizeof(uint32_t)
                                                             options:MTLResourceStorageModeShared];
             if (!buf_dispatch_hit_count)
                 buf_dispatch_hit_count = [mtl_device newBufferWithLength:sizeof(uint32_t)
@@ -821,6 +828,7 @@ uint32_t *gpu_metal_dispatch_batch(
 
         /* Params */
         MetalParams params;
+        memset(&params, 0, sizeof(params));
         params.compact_mask = _compact_mask;
         params.num_words = num_words;
         params.num_salts = is_unsalted ? 0 : _salts_count;
@@ -1121,7 +1129,7 @@ int gpu_metal_init_slots(int max_salt_count, int max_salt_bytes) {
                                                                 options:MTLResourceStorageModeShared];
             gpu_slots[i].buf_salt_len = [mtl_device newBufferWithLength:max_salt_count * sizeof(uint16_t)
                                                                 options:MTLResourceStorageModeShared];
-            gpu_slots[i].buf_hits = [mtl_device newBufferWithLength:GPU_SLOT_MAX_HITS * 7 * sizeof(uint32_t)
+            gpu_slots[i].buf_hits = [mtl_device newBufferWithLength:GPU_SLOT_MAX_HITS * GPU_HIT_STRIDE * sizeof(uint32_t)
                                                              options:MTLResourceStorageModeShared];
             gpu_slots[i].buf_hit_count = [mtl_device newBufferWithLength:sizeof(uint32_t)
                                                                  options:MTLResourceStorageModeShared];
@@ -1292,7 +1300,7 @@ int gpu_metal_dispatch(
         /* Params */
         /* Read compact_mask from the fp buffer metadata — stored during set_compact_table */
         MetalParams params;
-        params.compact_mask = 0; /* will be set below */
+        memset(&params, 0, sizeof(params));
         params.num_words = num_words;
         params.num_salts = num_salts;
         params.max_probe = 256;
@@ -1300,15 +1308,20 @@ int gpu_metal_dispatch(
 
         params.compact_mask = _compact_mask;
         params.hash_data_count = _hash_data_count;
+        params.iter_count = _iter_count;
+        params.overflow_count = _overflow_count;
+        params.max_iter = _max_iter;
+
+        int hit_capacity = (max_hits < 1024) ? max_hits : 1024;
+        params.max_hits = hit_capacity;
 
         id<MTLBuffer> b_params_buf = [mtl_device newBufferWithBytes:&params
                                                              length:sizeof(params)
                                                             options:MTLResourceStorageModeShared];
-        int hit_capacity = (max_hits < 1024) ? max_hits : 1024;
         id<MTLBuffer> local_hit_count = [mtl_device newBufferWithLength:sizeof(uint32_t)
                                                                 options:MTLResourceStorageModeShared];
         *(uint32_t *)[local_hit_count contents] = 0;
-        id<MTLBuffer> local_hits = [mtl_device newBufferWithLength:hit_capacity * 2 * sizeof(uint32_t)
+        id<MTLBuffer> local_hits = [mtl_device newBufferWithLength:hit_capacity * GPU_HIT_STRIDE * sizeof(uint32_t)
                                                             options:MTLResourceStorageModeShared];
 
         /* Encode and dispatch */

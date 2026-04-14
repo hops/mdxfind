@@ -121,8 +121,7 @@ kernel void sha1_unsalted_batch(
     sha1_compress(state, M);
 
     uint max_iter = params.max_iter;
-    /* SHA1: 5 hash words. hit_stride = 2 + 5 = 7, or 3 + 5 = 8 with iter */
-    uint hit_stride = (max_iter > 1) ? 8 : 7;
+    /* SHA1: 5 hash words, HIT_STRIDE 19 */
 
     for (uint iter = 1; iter <= max_iter; iter++) {
         /* Byte-swap state to LE for compact table probe */
@@ -173,14 +172,10 @@ kernel void sha1_unsalted_batch(
         if (found) {
             uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
             if (slot < params.max_hits) {
-                uint base = slot * hit_stride;
-                hits[base] = word_idx; hits[base+1] = mask_idx;
-                if (max_iter > 1) {
-                    hits[base+2] = iter;
-                    for (int i = 0; i < 5; i++) hits[base+3+i] = h[i];
-                } else {
-                    for (int i = 0; i < 5; i++) hits[base+2+i] = h[i];
-                }
+                uint base = slot * HIT_STRIDE;
+                hits[base] = word_idx; hits[base+1] = mask_idx; hits[base+2] = iter;
+                for (int i = 0; i < 5; i++) hits[base+3+i] = h[i];
+                for (uint _z = 8; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
             }
         }
         if (iter < max_iter) {
@@ -329,9 +324,11 @@ kernel void sql5_unsalted_batch(
     if (found) {
         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
         if (slot < params.max_hits) {
-            uint base = slot * 7;  /* 2 + 5 */
+            uint base = slot * HIT_STRIDE;
             hits[base] = word_idx; hits[base+1] = mask_idx;
-            for (int i = 0; i < 5; i++) hits[base+2+i] = h[i];
+            hits[base+2] = 1;
+                for (int i = 0; i < 5; i++) hits[base+3+i] = h[i];
+                for (uint _z = 8; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
         }
     }
 }

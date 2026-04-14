@@ -79,8 +79,11 @@ kernel void md5salt_probe(
                 if (match) {
                     uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
                     if (slot < 65536) {
-                        hits[slot * 2]     = word_idx;
-                        hits[slot * 2 + 1] = salt_idx;
+                        uint _hbase = slot * HIT_STRIDE;
+                        hits[_hbase] = word_idx; hits[_hbase+1] = salt_idx; hits[_hbase+2] = 1;
+                        hits[_hbase+3] = h2.x; hits[_hbase+4] = h2.y;
+                        hits[_hbase+5] = h2.z; hits[_hbase+6] = h2.w;
+                        for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[_hbase+_z] = 0;
                     }
                     return;
                 }
@@ -92,12 +95,11 @@ kernel void md5salt_probe(
     {
         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
         if (slot < params.max_hits) {
-            uint base = slot * 5;
-            hits[base]     = tid;
-            hits[base + 1] = h2.x;
-            hits[base + 2] = h2.y;
-            hits[base + 3] = h2.z;
-            hits[base + 4] = h2.w;
+            uint base = slot * HIT_STRIDE;
+            hits[base] = tid; hits[base+1] = 0; hits[base+2] = 1;
+            hits[base+3] = h2.x; hits[base+4] = h2.y;
+            hits[base+5] = h2.z; hits[base+6] = h2.w;
+            for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
         }
     }
 }
@@ -170,12 +172,11 @@ kernel void md5salt_salts_only(
                 if (match) {
                     uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
                     if (slot < params.max_hits) {
-                        uint base = slot * 5;
-                        hits[base]     = tid;
-                        hits[base + 1] = h2.x;
-                        hits[base + 2] = h2.y;
-                        hits[base + 3] = h2.z;
-                        hits[base + 4] = h2.w;
+                        uint base = slot * HIT_STRIDE;
+                        hits[base] = tid; hits[base+1] = 0; hits[base+2] = 1;
+                        hits[base+3] = h2.x; hits[base+4] = h2.y;
+                        hits[base+5] = h2.z; hits[base+6] = h2.w;
+                        for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
                     }
                     return;
                 }
@@ -187,12 +188,11 @@ kernel void md5salt_salts_only(
     {
         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
         if (slot < params.max_hits) {
-            uint base = slot * 5;
-            hits[base]     = tid;
-            hits[base + 1] = h2.x;
-            hits[base + 2] = h2.y;
-            hits[base + 3] = h2.z;
-            hits[base + 4] = h2.w;
+            uint base = slot * HIT_STRIDE;
+            hits[base] = tid; hits[base+1] = 0; hits[base+2] = 1;
+            hits[base+3] = h2.x; hits[base+4] = h2.y;
+            hits[base+5] = h2.z; hits[base+6] = h2.w;
+            for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
         }
     }
 }
@@ -320,13 +320,11 @@ kernel void md5salt_batch_prehashed(
                     h2.z == ref[2] && h2.w == ref[3]) {
                     uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
                     if (slot < params.max_hits) {
-                        uint base = slot * 6;
-                        hits[base]     = word_idx;
-                        hits[base + 1] = salt_idx;
-                        hits[base + 2] = h2.x;
-                        hits[base + 3] = h2.y;
-                        hits[base + 4] = h2.z;
-                        hits[base + 5] = h2.w;
+                        uint base = slot * HIT_STRIDE;
+                        hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
+                        hits[base+3] = h2.x; hits[base+4] = h2.y;
+                        hits[base+5] = h2.z; hits[base+6] = h2.w;
+                        for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
                     }
                     return;
                 }
@@ -352,13 +350,11 @@ kernel void md5salt_batch_prehashed(
                 if (match) {
                     uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
                     if (slot < params.max_hits) {
-                        uint base = slot * 6;
-                        hits[base]     = word_idx;
-                        hits[base + 1] = salt_idx;
-                        hits[base + 2] = h2.x;
-                        hits[base + 3] = h2.y;
-                        hits[base + 4] = h2.z;
-                        hits[base + 5] = h2.w;
+                        uint base = slot * HIT_STRIDE;
+                        hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
+                        hits[base+3] = h2.x; hits[base+4] = h2.y;
+                        hits[base+5] = h2.z; hits[base+6] = h2.w;
+                        for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
                     }
                     return;
                 }
@@ -369,10 +365,11 @@ kernel void md5salt_batch_prehashed(
                         h2.z == oref[2] && h2.w == oref[3]) {
                         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
                         if (slot < params.max_hits) {
-                            uint base = slot * 6;
-                            hits[base] = word_idx; hits[base+1] = salt_idx;
-                            hits[base+2] = h2.x; hits[base+3] = h2.y;
-                            hits[base+4] = h2.z; hits[base+5] = h2.w;
+                            uint base = slot * HIT_STRIDE;
+                            hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
+                            hits[base+3] = h2.x; hits[base+4] = h2.y;
+                            hits[base+5] = h2.z; hits[base+6] = h2.w;
+                            for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
                         }
                         return;
                     }
@@ -383,10 +380,11 @@ kernel void md5salt_batch_prehashed(
                         h2.z == oref[2] && h2.w == oref[3]) {
                         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
                         if (slot < params.max_hits) {
-                            uint base = slot * 6;
-                            hits[base] = word_idx; hits[base+1] = salt_idx;
-                            hits[base+2] = h2.x; hits[base+3] = h2.y;
-                            hits[base+4] = h2.z; hits[base+5] = h2.w;
+                            uint base = slot * HIT_STRIDE;
+                            hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
+                            hits[base+3] = h2.x; hits[base+4] = h2.y;
+                            hits[base+5] = h2.z; hits[base+6] = h2.w;
+                            for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
                         }
                         return;
                     }
@@ -526,14 +524,11 @@ kernel void md5salt_batch_iter(
                         h2.z == ref[2] && h2.w == ref[3]) {
                         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
                         if (slot < params.max_hits) {
-                            uint base = slot * 7;
-                            hits[base]     = word_idx;
-                            hits[base + 1] = salt_idx;
-                            hits[base + 2] = iter + 1;
-                            hits[base + 3] = h2.x;
-                            hits[base + 4] = h2.y;
-                            hits[base + 5] = h2.z;
-                            hits[base + 6] = h2.w;
+                            uint base = slot * HIT_STRIDE;
+                            hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = iter + 1;
+                            hits[base+3] = h2.x; hits[base+4] = h2.y;
+                            hits[base+5] = h2.z; hits[base+6] = h2.w;
+                            for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
                         }
                         found = true;
                         break;
@@ -558,11 +553,11 @@ kernel void md5salt_batch_iter(
                         h2.z == oref[2] && h2.w == oref[3]) {
                         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
                         if (slot < params.max_hits) {
-                            uint base = slot * 7;
-                            hits[base] = word_idx; hits[base+1] = salt_idx;
-                            hits[base+2] = iter + 1;
+                            uint base = slot * HIT_STRIDE;
+                            hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = iter + 1;
                             hits[base+3] = h2.x; hits[base+4] = h2.y;
                             hits[base+5] = h2.z; hits[base+6] = h2.w;
+                            for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
                         }
                         break;
                     }
@@ -572,11 +567,11 @@ kernel void md5salt_batch_iter(
                             h2.z == oref[2] && h2.w == oref[3]) {
                             uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
                             if (slot < params.max_hits) {
-                                uint base = slot * 7;
-                                hits[base] = word_idx; hits[base+1] = salt_idx;
-                                hits[base+2] = iter + 1;
+                                uint base = slot * HIT_STRIDE;
+                                hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = iter + 1;
                                 hits[base+3] = h2.x; hits[base+4] = h2.y;
                                 hits[base+5] = h2.z; hits[base+6] = h2.w;
+                                for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
                             }
                             found = true; break;
                         }
@@ -588,11 +583,11 @@ kernel void md5salt_batch_iter(
                                 h2.z == oref[2] && h2.w == oref[3]) {
                                 uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
                                 if (slot < params.max_hits) {
-                                    uint base = slot * 7;
-                                    hits[base] = word_idx; hits[base+1] = salt_idx;
-                                    hits[base+2] = iter + 1;
+                                    uint base = slot * HIT_STRIDE;
+                                    hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = iter + 1;
                                     hits[base+3] = h2.x; hits[base+4] = h2.y;
                                     hits[base+5] = h2.z; hits[base+6] = h2.w;
+                                    for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
                                 }
                                 break;
                             }
@@ -719,13 +714,11 @@ kernel void md5salt_batch_sub8_24(
                     h2.z == ref[2] && h2.w == ref[3]) {
                     uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
                     if (slot < params.max_hits) {
-                        uint base = slot * 6;
-                        hits[base]     = word_idx;
-                        hits[base + 1] = salt_idx;
-                        hits[base + 2] = h2.x;
-                        hits[base + 3] = h2.y;
-                        hits[base + 4] = h2.z;
-                        hits[base + 5] = h2.w;
+                        uint base = slot * HIT_STRIDE;
+                        hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
+                        hits[base+3] = h2.x; hits[base+4] = h2.y;
+                        hits[base+5] = h2.z; hits[base+6] = h2.w;
+                        for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
                     }
                     return;
                 }
@@ -750,13 +743,11 @@ kernel void md5salt_batch_sub8_24(
                 if (match) {
                     uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
                     if (slot < params.max_hits) {
-                        uint base = slot * 6;
-                        hits[base]     = word_idx;
-                        hits[base + 1] = salt_idx;
-                        hits[base + 2] = h2.x;
-                        hits[base + 3] = h2.y;
-                        hits[base + 4] = h2.z;
-                        hits[base + 5] = h2.w;
+                        uint base = slot * HIT_STRIDE;
+                        hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
+                        hits[base+3] = h2.x; hits[base+4] = h2.y;
+                        hits[base+5] = h2.z; hits[base+6] = h2.w;
+                        for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
                     }
                     return;
                 }
@@ -766,10 +757,11 @@ kernel void md5salt_batch_sub8_24(
                         h2.z == oref[2] && h2.w == oref[3]) {
                         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
                         if (slot < params.max_hits) {
-                            uint base = slot * 6;
-                            hits[base] = word_idx; hits[base+1] = salt_idx;
-                            hits[base+2] = h2.x; hits[base+3] = h2.y;
-                            hits[base+4] = h2.z; hits[base+5] = h2.w;
+                            uint base = slot * HIT_STRIDE;
+                            hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
+                            hits[base+3] = h2.x; hits[base+4] = h2.y;
+                            hits[base+5] = h2.z; hits[base+6] = h2.w;
+                            for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
                         }
                         return;
                     }
@@ -780,10 +772,11 @@ kernel void md5salt_batch_sub8_24(
                         h2.z == oref[2] && h2.w == oref[3]) {
                         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
                         if (slot < params.max_hits) {
-                            uint base = slot * 6;
-                            hits[base] = word_idx; hits[base+1] = salt_idx;
-                            hits[base+2] = h2.x; hits[base+3] = h2.y;
-                            hits[base+4] = h2.z; hits[base+5] = h2.w;
+                            uint base = slot * HIT_STRIDE;
+                            hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
+                            hits[base+3] = h2.x; hits[base+4] = h2.y;
+                            hits[base+5] = h2.z; hits[base+6] = h2.w;
+                            for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
                         }
                         return;
                     }

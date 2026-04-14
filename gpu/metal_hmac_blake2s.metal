@@ -112,10 +112,11 @@ kernel void hmac_blake2s_kpass_batch(
                 if (h.x == ref[0] && h.y == ref[1] && h.z == ref[2] && h.w == ref[3]) {
                     uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
                     if (slot < params.max_hits) {
-                        uint base = slot * 7;
+                        uint base = slot * HIT_STRIDE;
                         hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
                         hits[base+3] = h.x; hits[base+4] = h.y;
                         hits[base+5] = h.z; hits[base+6] = h.w;
+                        for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
                     }
                     return;
                 }
@@ -136,10 +137,11 @@ kernel void hmac_blake2s_kpass_batch(
                 if (h.x == oref[0] && h.y == oref[1] && h.z == oref[2] && h.w == oref[3]) {
                     uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
                     if (slot < params.max_hits) {
-                        uint base = slot * 7;
+                        uint base = slot * HIT_STRIDE;
                         hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
                         hits[base+3] = h.x; hits[base+4] = h.y;
                         hits[base+5] = h.z; hits[base+6] = h.w;
+                        for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
                     }
                     return;
                 }

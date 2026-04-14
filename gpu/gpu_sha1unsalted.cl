@@ -141,8 +141,6 @@ __kernel void sha1_unsalted_batch(
     sha1_compress(state, M);
 
     uint max_iter = params.max_iter;
-    /* SHA1: 5 hash words. hit_stride = 2 + 5 = 7, or 3 + 5 = 8 with iter */
-    uint hit_stride = (max_iter > 1) ? 8 : 7;
 
     for (uint iter = 1; iter <= max_iter; iter++) {
         /* Byte-swap all 5 state words to LE for compact table probe */
@@ -153,16 +151,7 @@ __kernel void sha1_unsalted_batch(
                           params.compact_mask, params.max_probe, params.hash_data_count,
                           hash_data_buf, hash_data_off,
                           overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-            uint slot = atomic_add(hit_count, 1u);
-            if (slot < params.max_hits) {
-                uint base = slot * hit_stride;
-                hits[base]   = word_idx;
-                hits[base+1] = mask_idx;
-                int offset = 2;
-                if (max_iter > 1) { hits[base+2] = iter; offset = 3; }
-                for (int i = 0; i < 5; i++) hits[base+offset+i] = h[i];
-                mem_fence(CLK_GLOBAL_MEM_FENCE);
-            }
+            EMIT_HIT_5(hits, hit_count, params.max_hits, word_idx, mask_idx, 1u, h)
         }
         if (iter < max_iter) {
             /* Hex-encode BE state into BE M[0..9] (40 hex chars), set padding */
@@ -291,14 +280,7 @@ __kernel void sql5_unsalted_batch(
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base = slot * 7;
-            hits[base]   = word_idx;
-            hits[base+1] = mask_idx;
-            for (int i = 0; i < 5; i++) hits[base+2+i] = h[i];
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        EMIT_HIT_5(hits, hit_count, params.max_hits, word_idx, mask_idx, 1u, h)
     }
 }
 
@@ -397,8 +379,6 @@ __kernel void sha1raw_unsalted_batch(
     M[15] = 160;
 
     uint max_iter = params.max_iter;
-    /* SHA1RAW: 5 hash words. hit_stride = 2 + 5 = 7, or 3 + 5 = 8 with iter */
-    uint hit_stride = (max_iter > 1) ? 8 : 7;
 
     for (uint iter = 1; iter <= max_iter; iter++) {
         uint h[5];
@@ -408,16 +388,7 @@ __kernel void sha1raw_unsalted_batch(
                           params.compact_mask, params.max_probe, params.hash_data_count,
                           hash_data_buf, hash_data_off,
                           overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-            uint slot = atomic_add(hit_count, 1u);
-            if (slot < params.max_hits) {
-                uint base = slot * hit_stride;
-                hits[base]   = word_idx;
-                hits[base+1] = mask_idx;
-                int offset = 2;
-                if (max_iter > 1) { hits[base+2] = iter; offset = 3; }
-                for (int i = 0; i < 5; i++) hits[base+offset+i] = h[i];
-                mem_fence(CLK_GLOBAL_MEM_FENCE);
-            }
+            EMIT_HIT_5(hits, hit_count, params.max_hits, word_idx, mask_idx, 1u, h)
         }
         if (iter < max_iter) {
             for (int i = 0; i < 5; i++) M[i] = state[i];

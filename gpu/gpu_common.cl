@@ -1,22 +1,93 @@
 /* md5salt.cl — OpenCL kernels for mdxfind MD5SALT GPU acceleration */
 
+/* GPU Params: 128-byte uniform API. uint64 first, then uint32, then reserved.
+ * Must match host-side OCLParams/MetalParams exactly. */
 typedef struct {
-    ulong compact_mask;
-    uint num_words;
-    uint num_salts;
-    uint salt_start;
-    uint max_probe;
-    uint hash_data_count;
-    uint max_hits;
-    uint overflow_count;
-    uint max_iter;
-    uint num_masks;     /* mask combinations per chunk (0 = not mask mode) */
-    ulong mask_start;   /* offset for mask chunking (uint64 for >4B keyspaces) */
-    uint n_prepend;     /* number of prepend mask positions */
-    uint n_append;      /* number of append mask positions */
-    ulong mask_base0;   /* pre-decomposed mask_start: positions 0-7 packed as bytes */
-    ulong mask_base1;   /* positions 8-15 packed as bytes */
+    ulong compact_mask;       /*  0: hash table mask */
+    ulong mask_start;         /*  8: mask keyspace offset */
+    ulong mask_base0;         /* 16: pre-decomposed positions 0-7 */
+    ulong mask_base1;         /* 24: pre-decomposed positions 8-15 */
+    uint  num_words;          /* 32: words in batch */
+    uint  num_salts;          /* 36: salts for dispatch */
+    uint  salt_start;         /* 40: starting salt index */
+    uint  max_probe;          /* 44: compact table probe depth */
+    uint  hash_data_count;    /* 48: hash_data entries */
+    uint  max_hits;           /* 52: hit buffer capacity */
+    uint  overflow_count;     /* 56: overflow table entries */
+    uint  max_iter;           /* 60: iteration count (-i) */
+    uint  num_masks;          /* 64: mask combinations per chunk */
+    uint  n_prepend;          /* 68: prepend mask positions (-N) */
+    uint  n_append;           /* 72: append mask positions (-n) */
+    uint  iter_count;         /* 76: per-dispatch iteration (PHPBB3) */
+    uint  reserved32[4];      /* 80-95: reserved */
+    ulong reserved64[4];      /* 96-127: reserved */
 } OCLParams;
+
+/* Universal hit entry: fixed stride 19 uint32 words.
+ * [0] word_idx  [1] salt_idx  [2] iter_num  [3..18] hash[0..15] */
+#define HIT_STRIDE 19
+
+#define EMIT_HIT_4(hits, hit_count, max_hits, widx, sidx, iter, a, b, c, d) \
+    { uint _slot = atomic_add(hit_count, 1u); \
+      if (_slot < max_hits) { \
+        uint _base = _slot * HIT_STRIDE; \
+        hits[_base] = (widx); hits[_base+1] = (sidx); hits[_base+2] = (iter); \
+        hits[_base+3] = (a); hits[_base+4] = (b); hits[_base+5] = (c); hits[_base+6] = (d); \
+        for (uint _z = 7; _z < HIT_STRIDE; _z++) hits[_base+_z] = 0; \
+        mem_fence(CLK_GLOBAL_MEM_FENCE); } }
+
+#define EMIT_HIT_5(hits, hit_count, max_hits, widx, sidx, iter, h) \
+    { uint _slot = atomic_add(hit_count, 1u); \
+      if (_slot < max_hits) { \
+        uint _base = _slot * HIT_STRIDE; \
+        hits[_base] = (widx); hits[_base+1] = (sidx); hits[_base+2] = (iter); \
+        for (uint _i = 0; _i < 5; _i++) hits[_base+3+_i] = (h)[_i]; \
+        for (uint _z = 8; _z < HIT_STRIDE; _z++) hits[_base+_z] = 0; \
+        mem_fence(CLK_GLOBAL_MEM_FENCE); } }
+
+#define EMIT_HIT_6(hits, hit_count, max_hits, widx, sidx, iter, h) \
+    { uint _slot = atomic_add(hit_count, 1u); \
+      if (_slot < max_hits) { \
+        uint _base = _slot * HIT_STRIDE; \
+        hits[_base] = (widx); hits[_base+1] = (sidx); hits[_base+2] = (iter); \
+        for (uint _i = 0; _i < 6; _i++) hits[_base+3+_i] = (h)[_i]; \
+        for (uint _z = 9; _z < HIT_STRIDE; _z++) hits[_base+_z] = 0; \
+        mem_fence(CLK_GLOBAL_MEM_FENCE); } }
+
+#define EMIT_HIT_7(hits, hit_count, max_hits, widx, sidx, iter, h) \
+    { uint _slot = atomic_add(hit_count, 1u); \
+      if (_slot < max_hits) { \
+        uint _base = _slot * HIT_STRIDE; \
+        hits[_base] = (widx); hits[_base+1] = (sidx); hits[_base+2] = (iter); \
+        for (uint _i = 0; _i < 7; _i++) hits[_base+3+_i] = (h)[_i]; \
+        for (uint _z = 10; _z < HIT_STRIDE; _z++) hits[_base+_z] = 0; \
+        mem_fence(CLK_GLOBAL_MEM_FENCE); } }
+
+#define EMIT_HIT_8(hits, hit_count, max_hits, widx, sidx, iter, h) \
+    { uint _slot = atomic_add(hit_count, 1u); \
+      if (_slot < max_hits) { \
+        uint _base = _slot * HIT_STRIDE; \
+        hits[_base] = (widx); hits[_base+1] = (sidx); hits[_base+2] = (iter); \
+        for (uint _i = 0; _i < 8; _i++) hits[_base+3+_i] = (h)[_i]; \
+        for (uint _z = 11; _z < HIT_STRIDE; _z++) hits[_base+_z] = 0; \
+        mem_fence(CLK_GLOBAL_MEM_FENCE); } }
+
+#define EMIT_HIT_12(hits, hit_count, max_hits, widx, sidx, iter, h) \
+    { uint _slot = atomic_add(hit_count, 1u); \
+      if (_slot < max_hits) { \
+        uint _base = _slot * HIT_STRIDE; \
+        hits[_base] = (widx); hits[_base+1] = (sidx); hits[_base+2] = (iter); \
+        for (uint _i = 0; _i < 12; _i++) hits[_base+3+_i] = (h)[_i]; \
+        for (uint _z = 15; _z < HIT_STRIDE; _z++) hits[_base+_z] = 0; \
+        mem_fence(CLK_GLOBAL_MEM_FENCE); } }
+
+#define EMIT_HIT_16(hits, hit_count, max_hits, widx, sidx, iter, h) \
+    { uint _slot = atomic_add(hit_count, 1u); \
+      if (_slot < max_hits) { \
+        uint _base = _slot * HIT_STRIDE; \
+        hits[_base] = (widx); hits[_base+1] = (sidx); hits[_base+2] = (iter); \
+        for (uint _i = 0; _i < 16; _i++) hits[_base+3+_i] = (h)[_i]; \
+        mem_fence(CLK_GLOBAL_MEM_FENCE); } }
 
 __constant uint K[64] = {
     0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,0xa8304613,0xfd469501,

@@ -49,6 +49,11 @@ void *malloc_lock(size_t size, const char *reason);
 
 #define GPU_MAX_PASSLEN  55  /* max password length for GPU (single MD5 block with salt) */
 
+/* Universal GPU hit entry stride: 19 uint32 words per hit.
+ * Layout: [0]=word_idx [1]=salt_idx [2]=iter_num [3..18]=hash[0..15]
+ * All kernels emit this format. No exceptions. */
+#define GPU_HIT_STRIDE   19
+
 /* Returns GPU category for an op code, or GPU_CAT_NONE */
 int gpu_op_category(int op);
 

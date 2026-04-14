@@ -772,11 +772,11 @@ kernel void wrl_unsalted_batch(
     if (found) {
         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
         if (slot < params.max_hits) {
-            uint base = slot * 18;  /* 2 + 16 */
-            hits[base] = word_idx; hits[base+1] = mask_idx;
+            uint base = slot * HIT_STRIDE;
+            hits[base] = word_idx; hits[base+1] = mask_idx; hits[base+2] = 1;
             for (int i = 0; i < 8; i++) {
                 ulong sw = bswap64(hash[i]);
-                hits[base+2+i*2]   = (uint)sw;
-                hits[base+2+i*2+1] = (uint)(sw >> 32);
+                hits[base+3+i*2]   = (uint)sw;
+                hits[base+3+i*2+1] = (uint)(sw >> 32);
             } } }
 }

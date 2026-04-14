@@ -122,13 +122,6 @@ __kernel void md5_mask_batch(
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base2 = slot * 6;
-            hits[base2] = word_idx; hits[base2+1] = mask_idx;
-            hits[base2+2] = hx; hits[base2+3] = hy;
-            hits[base2+4] = hz; hits[base2+5] = hw;
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        EMIT_HIT_4(hits, hit_count, params.max_hits, word_idx, mask_idx, 1u, hx, hy, hz, hw)
     }
 }

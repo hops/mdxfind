@@ -130,13 +130,6 @@ __kernel void md5crypt_batch(
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base = slot * 6;
-            hits[base] = word_idx; hits[base+1] = salt_idx;
-            hits[base+2] = hx; hits[base+3] = hy;
-            hits[base+4] = hz; hits[base+5] = hw;
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        EMIT_HIT_4(hits, hit_count, params.max_hits, word_idx, salt_idx, 1u, hx, hy, hz, hw)
     }
 }

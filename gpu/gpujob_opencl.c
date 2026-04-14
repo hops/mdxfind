@@ -315,7 +315,7 @@ void gpujob(void *arg) {
     int my_slot = (int)(intptr_t)arg;
     union HashU curin;
     struct job synthetic_job;
-    char *outbuf = (char *)malloc_lock(OUTBUFSIZE,"gpujob");
+    char *outbuf = (char *)malloc_lock(OUTBUFSIZE+1024,"gpujob");
     uint64_t hashcnt = 0, found = 0;
     char tsalt[4096];
 
@@ -465,17 +465,11 @@ void gpujob(void *arg) {
             salt_refresh = 1;
             salt_hits_pending += nhits;
             int stored = nhits > GPU_MAX_RETURN ? GPU_MAX_RETURN : nhits;
-            int is_md5crypt = (g->op == JOB_MD5CRYPT || g->op == JOB_PHPBB3);
-            int is_bcrypt = (g->op == JOB_BCRYPT);
-            int hash_words = is_bcrypt ? 6 : gpu_hash_words(g->op);
+            int hash_words = gpu_hash_words(g->op);
             int hexlen = hash_words * 8;
-            /* hit_stride = 2 (word_idx, mask_idx/salt_idx) + hash_words
-             * + 1 for iter when iteration/saltpass modes are active.
-             * md5crypt/phpbb3: fixed stride 6, bcrypt: fixed stride 9. */
-            int has_iter = (Maxiter > 1 || op_cat == GPU_CAT_ITER || op_cat == GPU_CAT_SALTPASS);
-            int hit_stride = is_md5crypt ? 6
-                : is_bcrypt ? 9
-                : has_iter ? (3 + hash_words) : (2 + hash_words);
+            /* Universal hit stride: all kernels emit 19 uint32 words per hit.
+             * [0]=word_idx [1]=salt_idx [2]=iter_num [3..18]=hash[0..15] */
+            /* GPU_HIT_STRIDE defined in gpujob.h */
             int overflow = (nhits > GPU_MAX_RETURN);
 
             /* Track highest mask/salt index among stored hits for overflow retry.
@@ -484,28 +478,16 @@ void gpujob(void *arg) {
             uint32_t max_salt_idx = 0;
 
             for (int h = 0; h < stored; h++) {
-                uint32_t *entry = hits + h * hit_stride;
+                uint32_t *entry = hits + h * GPU_HIT_STRIDE;
                 int widx = entry[0];
                 int sidx = entry[1];
                 if ((unsigned)widx >= (unsigned)g->count) continue;
                 if (op_cat != GPU_CAT_MASK && op_cat != GPU_CAT_UNSALTED && sidx < 0) continue;
 
-
-                int iter_num;
-                if (is_md5crypt) {
-                    /* md5crypt/phpbb3: fixed stride 6, no iter field */
-                    iter_num = 1;
-                    for (int w = 0; w < 4; w++)
-                        curin.i[w] = entry[2 + w];
-                } else if (has_iter) {
-                    iter_num = entry[2];
-                    for (int w = 0; w < hash_words; w++)
-                        curin.i[w] = entry[3 + w];
-                } else {
-                    iter_num = 1;
-                    for (int w = 0; w < hash_words; w++)
-                        curin.i[w] = entry[2 + w];
-                }
+                /* Universal hit layout: [0]=widx [1]=sidx [2]=iter [3..]=hash */
+                int iter_num = entry[2];
+                for (int w = 0; w < hash_words; w++)
+                    curin.i[w] = entry[3 + w];
 
                 if (op_cat == GPU_CAT_MASK || op_cat == GPU_CAT_UNSALTED) {
                     /* Mask/unsalted: reconstruct candidate from base word + mask index.
@@ -519,8 +501,7 @@ void gpujob(void *arg) {
                     uint64_t midx = chunk_ms + (uint64_t)(midx32 - (uint32_t)chunk_ms);
                     char *base_word;
                     int blen;
-                    if (g->word_stride && widx < 4096 &&
-                        (gpu_mask_n_prepend > 0 || gpu_mask_n_append > 0)) {
+                    if (g->word_stride && widx < 4096) {
                         char *slot = g->raw + widx * g->word_stride;
                         int total_len = ((uint32_t *)slot)[14] >> 3;
                         blen = total_len - gpu_mask_n_prepend - gpu_mask_n_append;
@@ -1373,6 +1354,9 @@ int gpu_hash_words(int op) {
     case JOB_SHA224:
     case JOB_KECCAK224: case JOB_SHA3_224:
         return 7;
+    /* 192-bit output = 6 words (bcrypt) */
+    case JOB_BCRYPT:
+        return 6;
     /* 160-bit output = 5 words */
     case JOB_SHA1: case JOB_SHA1RAW: case JOB_SQL5:
     case JOB_SHA1PASSSALT: case JOB_SHA1SALTPASS: case JOB_SHA1DRU:

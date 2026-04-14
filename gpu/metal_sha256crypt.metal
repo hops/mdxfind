@@ -210,13 +210,14 @@ kernel void sha256crypt_batch(
                 if (h.x==ref[0]&&h.y==ref[1]&&h.z==ref[2]&&h.w==ref[3]) {
                     uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
                     if (slot < params.max_hits) {
-                        uint base = slot * 11;
+                        uint base = slot * HIT_STRIDE;
                         hits[base]=word_idx; hits[base+1]=salt_idx; hits[base+2]=1;
                         hits[base+3]=hx; hits[base+4]=hy; hits[base+5]=hz; hits[base+6]=hw;
                         hits[base+7]=(uint)curin[16]|((uint)curin[17]<<8)|((uint)curin[18]<<16)|((uint)curin[19]<<24);
                         hits[base+8]=(uint)curin[20]|((uint)curin[21]<<8)|((uint)curin[22]<<16)|((uint)curin[23]<<24);
                         hits[base+9]=(uint)curin[24]|((uint)curin[25]<<8)|((uint)curin[26]<<16)|((uint)curin[27]<<24);
                         hits[base+10]=(uint)curin[28]|((uint)curin[29]<<8)|((uint)curin[30]<<16)|((uint)curin[31]<<24);
+                        for (uint _z = 11; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
                     }
                     return;
                 }

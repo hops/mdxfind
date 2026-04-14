@@ -138,13 +138,7 @@ __kernel void hmac_sha512_ksalt_batch(
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base = slot * 19;  /* 3 + 16 */
-            hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
-            for (int i = 0; i < 16; i++) hits[base+3+i] = h[i];
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        EMIT_HIT_16(hits, hit_count, params.max_hits, word_idx, salt_idx, 1, h)
     }
 }
 
@@ -255,13 +249,7 @@ __kernel void hmac_sha512_kpass_batch(
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base = slot * 19;  /* 3 + 16 */
-            hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
-            for (int i = 0; i < 16; i++) hits[base+3+i] = h[i];
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        EMIT_HIT_16(hits, hit_count, params.max_hits, word_idx, salt_idx, 1, h)
     }
 }
 
@@ -374,13 +362,7 @@ __kernel void hmac_sha384_ksalt_batch(
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base = slot * 15;  /* 3 + 12 */
-            hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
-            for (int i = 0; i < 12; i++) hits[base+3+i] = h[i];
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        EMIT_HIT_12(hits, hit_count, params.max_hits, word_idx, salt_idx, 1, h)
     }
 }
 
@@ -480,13 +462,7 @@ __kernel void hmac_sha384_kpass_batch(
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base = slot * 15;  /* 3 + 12 */
-            hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
-            for (int i = 0; i < 12; i++) hits[base+3+i] = h[i];
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        EMIT_HIT_12(hits, hit_count, params.max_hits, word_idx, salt_idx, 1, h)
     }
 }
 
@@ -560,13 +536,7 @@ __kernel void sha512passsalt_batch(
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base = slot * 19;  /* 3 + 16 */
-            hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
-            for (int i = 0; i < 16; i++) hits[base+3+i] = h[i];
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        EMIT_HIT_16(hits, hit_count, params.max_hits, word_idx, salt_idx, 1, h)
     }
 }
 
@@ -640,12 +610,6 @@ __kernel void sha512saltpass_batch(
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base = slot * 19;  /* 3 + 16 */
-            hits[base] = word_idx; hits[base+1] = salt_idx; hits[base+2] = 1;
-            for (int i = 0; i < 16; i++) hits[base+3+i] = h[i];
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        EMIT_HIT_16(hits, hit_count, params.max_hits, word_idx, salt_idx, 1, h)
     }
 }

@@ -191,8 +191,10 @@ static const char metal_md6256unsalted_str[] =
     "    if (found) {\n"
     "        uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);\n"
     "        if (slot < params.max_hits) {\n"
-    "            uint base = slot * 10;  /* 2 + 8 */\n"
+    "            uint base = slot * HIT_STRIDE;\n"
     "            hits[base] = word_idx; hits[base+1] = mask_idx;\n"
-    "            for (int i = 0; i < 8; i++) hits[base+2+i] = h[i]; } }\n"
+    "            hits[base+2] = 1;\n"
+    "            for (int i = 0; i < 8; i++) hits[base+3+i] = h[i];\n"
+    "            for (uint _z = 11; _z < HIT_STRIDE; _z++) hits[base+_z] = 0; } }\n"
     "}\n"
 ;

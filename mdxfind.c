@@ -183,9 +183,15 @@ int Neon;
 #define mysha1 SHA1
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.303 2026/04/14 15:26:33 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.305 2026/04/14 23:00:05 dlr Exp dlr $";
 /*
  * $Log: mdxfind.c,v $
+ * Revision 1.305  2026/04/14 23:00:05  dlr
+ * GPU API v2: 128-byte params struct (uint64 first, zero padding), GPU_HIT_STRIDE 19 universal hit entry, POWER8 AltiVec MD5SALT/PHPBB3 SIMD, outbuf overflow fix, word_stride extraction fix
+ *
+ * Revision 1.304  2026/04/14 19:56:38  dlr
+ * POWER8 AltiVec SIMD: mymd5salt_pre/post/salt2, procsaltbb for 4-wide MD5SALT and PHPBB3 (3x speedup)
+ *
  * Revision 1.303  2026/04/14 15:26:33  dlr
  * Multi-GPU brute-force: atomic cursor keyspace sharing, Word_t fix for 64-bit Judy on Windows, gpujob_return_free, bf_start/bf_stop lifecycle
  *
@@ -1516,6 +1522,8 @@ extern void mymd5salt_post(unsigned char *dest, SVAL *state, SVAL *hash);
 extern void mymd5salt2(void *dest, void *hash);
 #if ARM > 6
 extern void procsaltbb(uint32x4_t *SSEBUF, struct job *job, int pcnt, char *sbuf[], int myiter);
+#elif defined(POWERPC)
+extern void procsaltbb(vector unsigned int *SSEBUF, struct job *job, int pcnt, char *sbuf[], int myiter);
 #endif
 
 #endif
@@ -8800,7 +8808,7 @@ SSEBUF[15] = vdupq_n_u32(0);
 #ifdef POWERPC
 vector unsigned int SSEBUF[16],SSEBUF2[16],SSEBUF3[32];
 vector unsigned int hashes[4];
-vector unsigned int *X,*X1,*R,*R1;
+SVAL *X,*X1,*R,*R1;
 SSEBUF[15]=((vector unsigned int){0,0,0,0});
 #endif
 #ifndef NOTINTEL
@@ -11829,6 +11837,92 @@ nextbb:
                   if (!nsalts_job) Typedone[job->op] = 1;
                 } else {
                   /* Password too long for NEON batching — scalar fallback */
+                  curin.i[4] = curin.i[5] = 0;
+                  { int si;
+                  for (si = 0; si < nsalts_job; si++) {
+                    s1 = saltsnap[si].salt;
+                    i = i64hex[s1[3] & 0xff];
+                    if (i < 7 || i > 30) continue;
+                    saltlen = saltsnap[si].saltlen - 4;
+                    i = 1 << i;
+                    memmove(cur - saltlen, s1 + 4, saltlen);
+                    mymd5(cur - saltlen, len + saltlen, curin.h);
+                    hashcnt += 1 + i;
+                    for (x = 0; x < i; x++) {
+                      memmove(cur - 16, curin.h, 16);
+                      mymd5(cur - 16, 16 + len, curin.h);
+                    }
+                    if (checkhashbb(&curin, 32, s1, job) && NoMarkSalt == 0)
+                      PV_DEC(saltsnap[si].PV);
+                    if (!Printall && *saltsnap[si].PV == 0) {
+                      saltsnap[si] = saltsnap[--nsalts_job]; si--;
+                    }
+                  }
+                  if (!nsalts_job) Typedone[job->op] = 1;
+                  }
+                }
+#elif defined(POWERPC)
+                /* AltiVec 4-wide PHPBB3: batch 4 salts with same iteration count */
+                if (len < 40) {
+                  int si, pcnt = 0, myiter = 0;
+                  char *sbuf[4], sbufcopy[4 * 64];
+                  Word_t *pvbuf[4];
+                  SVAL *R;
+                  cur[len] = 0x80;
+                  cur[len + 1] = cur[len + 2] = cur[len + 3] = cur[len + 4] = 0;
+                  init_md5sse((unsigned char *)(cur - 16), len + 16 + 1, (unsigned char *)SSEBUF);
+                  SSEBUF[14] = (vector unsigned int){(unsigned)(len + 16) << 3, (unsigned)(len + 16) << 3, (unsigned)(len + 16) << 3, (unsigned)(len + 16) << 3};
+                  R = (SVAL *) SSEBUF;
+                  for (si = 0; si < nsalts_job; si++) {
+                    s1 = saltsnap[si].salt;
+                    i = i64hex[s1[3] & 0xff];
+                    if (i < 7 || i > 30) continue;
+                    saltlen = saltsnap[si].saltlen - 4;
+                    i = 1 << i;
+                    memmove(cur - saltlen, s1 + 4, saltlen);
+                    mymd5(cur - saltlen, len + saltlen, curin.h);
+                    hashcnt += 1 + i;
+                    if (myiter && myiter != i && pcnt) {
+                      procsaltbb(SSEBUF, job, pcnt, sbuf, myiter);
+                      for (y = 0; y < pcnt; y++) {
+                        if ((unsigned char)sbuf[y][3] == 0xfe && NoMarkSalt == 0)
+                          PV_DEC(pvbuf[y]);
+                      }
+                      pcnt = 0; myiter = 0;
+                    }
+                    if (myiter == 0) myiter = i;
+                    strncpy(sbufcopy + pcnt * 64, saltsnap[si].salt, 63);
+                    sbufcopy[pcnt * 64 + 63] = 0;
+                    sbuf[pcnt] = sbufcopy + pcnt * 64;
+                    pvbuf[pcnt] = saltsnap[si].PV;
+                    R[0].words[pcnt] = curin.i[0];
+                    R[1].words[pcnt] = curin.i[1];
+                    R[2].words[pcnt] = curin.i[2];
+                    R[3].words[pcnt] = curin.i[3];
+                    pcnt++;
+                    if (pcnt == 4) {
+                      procsaltbb(SSEBUF, job, pcnt, sbuf, myiter);
+                      for (y = 0; y < pcnt; y++) {
+                        if ((unsigned char)sbuf[y][3] == 0xfe && NoMarkSalt == 0)
+                          PV_DEC(pvbuf[y]);
+                      }
+                      pcnt = 0; myiter = 0;
+                    }
+                  }
+                  if (pcnt) {
+                    procsaltbb(SSEBUF, job, pcnt, sbuf, myiter);
+                    for (y = 0; y < pcnt; y++) {
+                      if ((unsigned char)sbuf[y][3] == 0xfe && NoMarkSalt == 0)
+                        PV_DEC(pvbuf[y]);
+                    }
+                  }
+                  for (si = nsalts_job - 1; si >= 0; si--) {
+                    if (!Printall && *saltsnap[si].PV == 0)
+                      saltsnap[si] = saltsnap[--nsalts_job];
+                  }
+                  if (!nsalts_job) Typedone[job->op] = 1;
+                } else {
+                  /* Password too long for AltiVec batching — scalar fallback */
                   curin.i[4] = curin.i[5] = 0;
                   { int si;
                   for (si = 0; si < nsalts_job; si++) {
@@ -20386,8 +20480,8 @@ MD5SALTstart:
               } else
 #endif /* GPU_ENABLED */
               {
-#if ARM > 6
-              /* NEON 4-wide salt loop — same pattern as Intel SSE */
+#if ARM > 6 || defined(POWERPC)
+              /* SIMD 4-wide salt loop (NEON / AltiVec) */
               init_md5sse(cur, len, SSEBUF);
               done2 = 0;
               maxsaltlen = 0;
@@ -20437,10 +20531,19 @@ MD5SALTstart:
                     pcnt++;
                   } else {
                     /* Long salt: pack into SSEBUF3 for two-block MD5 */
+#if ARM > 6
                     uint32x4_t *p, r1;
+#else
+                    vector unsigned int *p, r1;
+#endif
                     if (!done2) {
+#if ARM > 6
                       r1 = vdupq_n_u32(0);
                       p = (uint32x4_t *) SSEBUF3;
+#else
+                      r1 = (vector unsigned int){0,0,0,0};
+                      p = (vector unsigned int *) SSEBUF3;
+#endif
                       for (j = 0; j < 32; j++)
                         p[j] = r1;
                       init_md5sse(cur, 32, SSEBUF3);
@@ -20484,7 +20587,12 @@ MD5SALTstart:
                       }
                     }
                     /* Clear leftover salt data from SSEBUF lanes */
-                    { uint32x4_t zv = vdupq_n_u32(0);
+                    {
+#if ARM > 6
+                      uint32x4_t zv = vdupq_n_u32(0);
+#else
+                      vector unsigned int zv = (vector unsigned int){0,0,0,0};
+#endif
                       for (j = len/4; j <= 13; j++)
                         X[j].sse = zv;
                     }
@@ -44726,11 +44834,13 @@ reprocess:
 	    J1N(RC, Dohash, NextX); 
 	    continue; 
 	  }
-	  if (linehints[x].gpu) {
+	  if (linehints[x].gpu && !NoMetal) {
 	    linehints[x].lineswanted = UINT_MAX;
 	    numline = UINT_MAX;
 	  } else {
 	    linehints[x].lineswanted = linehints[x].rate;
+	    if (maxt > 1)
+	      linehints[x].lineswanted /= maxt;
 	    if (Livesalts[x])
 	      linehints[x].lineswanted /= Livesalts[x];
 	    if (MaskTotal > 1)

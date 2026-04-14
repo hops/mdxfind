@@ -306,30 +306,8 @@ __kernel void sha256crypt_batch(
                       params.compact_mask, params.max_probe, params.hash_data_count,
                       hash_data_buf, hash_data_off,
                       overflow_keys, overflow_hashes, overflow_offsets, params.overflow_count)) {
-        uint slot = atomic_add(hit_count, 1u);
-        if (slot < params.max_hits) {
-            uint base = slot * 11;
-            hits[base]    = word_idx;
-            hits[base+1]  = salt_idx;
-            hits[base+2]  = 1; /* iter */
-            /* Store all 8 x uint32 of the 32-byte hash from curin[] */
-            hits[base+3]  = (uint)curin[0]  | ((uint)curin[1]  << 8) |
-                            ((uint)curin[2]  << 16) | ((uint)curin[3]  << 24);
-            hits[base+4]  = (uint)curin[4]  | ((uint)curin[5]  << 8) |
-                            ((uint)curin[6]  << 16) | ((uint)curin[7]  << 24);
-            hits[base+5]  = (uint)curin[8]  | ((uint)curin[9]  << 8) |
-                            ((uint)curin[10] << 16) | ((uint)curin[11] << 24);
-            hits[base+6]  = (uint)curin[12] | ((uint)curin[13] << 8) |
-                            ((uint)curin[14] << 16) | ((uint)curin[15] << 24);
-            hits[base+7]  = (uint)curin[16] | ((uint)curin[17] << 8) |
-                            ((uint)curin[18] << 16) | ((uint)curin[19] << 24);
-            hits[base+8]  = (uint)curin[20] | ((uint)curin[21] << 8) |
-                            ((uint)curin[22] << 16) | ((uint)curin[23] << 24);
-            hits[base+9]  = (uint)curin[24] | ((uint)curin[25] << 8) |
-                            ((uint)curin[26] << 16) | ((uint)curin[27] << 24);
-            hits[base+10] = (uint)curin[28] | ((uint)curin[29] << 8) |
-                            ((uint)curin[30] << 16) | ((uint)curin[31] << 24);
-            mem_fence(CLK_GLOBAL_MEM_FENCE);
-        }
+        { uint _h[8];
+            for (int _i = 0; _i < 8; _i++) _h[_i] = (uint)curin[_i*4] | ((uint)curin[_i*4+1] << 8) | ((uint)curin[_i*4+2] << 16) | ((uint)curin[_i*4+3] << 24);
+            EMIT_HIT_8(hits, hit_count, params.max_hits, word_idx, salt_idx, 1, _h) }
     }
 }

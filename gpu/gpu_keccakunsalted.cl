@@ -188,13 +188,14 @@ __kernel void name(                                                            \
                       params.hash_data_count, hash_data_buf, hash_data_off,    \
                       overflow_keys, overflow_hashes, overflow_offsets,         \
                       params.overflow_count)) {                                \
-        uint slot = atomic_add(hit_count, 1u);                                 \
-        if (slot < params.max_hits) {                                          \
-            uint base = slot * (2 + hash_words);                               \
-            hits[base] = word_idx; hits[base+1] = mask_idx;                    \
-            for (int i = 0; i < hash_words; i++) hits[base+2+i] = h[i];       \
+        { uint _slot = atomic_add(hit_count, 1u);                              \
+        if (_slot < params.max_hits) {                                          \
+            uint _base = _slot * HIT_STRIDE;                                   \
+            hits[_base] = word_idx; hits[_base+1] = mask_idx; hits[_base+2] = 1u; \
+            for (int i = 0; i < hash_words; i++) hits[_base+3+i] = h[i];       \
+            for (uint _z = 3 + hash_words; _z < HIT_STRIDE; _z++) hits[_base+_z] = 0; \
             mem_fence(CLK_GLOBAL_MEM_FENCE);                                   \
-        }                                                                      \
+        } }                                                                    \
     }                                                                          \
 }
 

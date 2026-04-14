@@ -115,8 +115,6 @@ kernel void sha256_unsalted_batch(
     sha256_compress(state, M);
 
     uint max_iter = params.max_iter;
-    /* SHA256: 8 hash words. hit_stride = 2 + 8 = 10, or 3 + 8 = 11 with iter */
-    uint hit_stride = (max_iter > 1) ? 11 : 10;
 
     for (uint iter = 1; iter <= max_iter; iter++) {
         uint h[8];
@@ -166,11 +164,10 @@ kernel void sha256_unsalted_batch(
         if (found) {
             uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
             if (slot < params.max_hits) {
-                uint base = slot * hit_stride;
-                hits[base] = word_idx; hits[base+1] = mask_idx;
-                int offset = 2;
-                if (max_iter > 1) { hits[base+2] = iter; offset = 3; }
-                for (int i = 0; i < 8; i++) hits[base+offset+i] = h[i];
+                uint base = slot * HIT_STRIDE;
+                hits[base] = word_idx; hits[base+1] = mask_idx; hits[base+2] = iter;
+                for (int i = 0; i < 8; i++) hits[base+3+i] = h[i];
+                for (uint _z = 11; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
             }
         }
         if (iter < max_iter) {
@@ -295,8 +292,6 @@ kernel void sha224_unsalted_batch(
     sha256_compress(state, M);
 
     uint max_iter = params.max_iter;
-    /* SHA224: 7 hash words. hit_stride = 2 + 7 = 9, or 3 + 7 = 10 with iter */
-    uint hit_stride = (max_iter > 1) ? 10 : 9;
 
     for (uint iter = 1; iter <= max_iter; iter++) {
         uint h[7];
@@ -346,11 +341,10 @@ kernel void sha224_unsalted_batch(
         if (found) {
             uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
             if (slot < params.max_hits) {
-                uint base = slot * hit_stride;
-                hits[base] = word_idx; hits[base+1] = mask_idx;
-                int offset = 2;
-                if (max_iter > 1) { hits[base+2] = iter; offset = 3; }
-                for (int i = 0; i < 7; i++) hits[base+offset+i] = h[i];
+                uint base = slot * HIT_STRIDE;
+                hits[base] = word_idx; hits[base+1] = mask_idx; hits[base+2] = iter;
+                for (int i = 0; i < 7; i++) hits[base+3+i] = h[i];
+                for (uint _z = 10; _z < HIT_STRIDE; _z++) hits[base+_z] = 0;
             }
         }
         if (iter < max_iter) {

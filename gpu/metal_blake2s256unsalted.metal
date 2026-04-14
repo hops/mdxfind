@@ -155,7 +155,9 @@ kernel void blake2s256_unsalted_batch(
     if (found) {
         uint slot = atomic_fetch_add_explicit(hit_count, 1, memory_order_relaxed);
         if (slot < params.max_hits) {
-            uint base = slot * 10;  /* 2 + 8 */
+            uint base = slot * HIT_STRIDE;
             hits[base] = word_idx; hits[base+1] = mask_idx;
-            for (int i = 0; i < 8; i++) hits[base+2+i] = h[i]; } }
+            hits[base+2] = 1;
+            for (int i = 0; i < 8; i++) hits[base+3+i] = h[i];
+            for (uint _z = 11; _z < HIT_STRIDE; _z++) hits[base+_z] = 0; } }
 }

@@ -330,7 +330,7 @@ void gpujob(void *arg) {
     int my_slot = (int)(intptr_t)arg;
     union HashU curin;
     struct job synthetic_job;
-    char *outbuf = (char *)malloc_lock(OUTBUFSIZE, "gpujob");
+    char *outbuf = (char *)malloc_lock(OUTBUFSIZE+1024, "gpujob");
     uint64_t hashcnt = 0, found = 0;
     char tsalt[4096];
 
@@ -662,10 +662,11 @@ void gpujob(void *arg) {
                 if (hits && ghits > 0) {
                     int stored = ghits > GPU_MAX_RETURN ? GPU_MAX_RETURN : ghits;
                     for (int h = 0; h < stored; h++) {
-                        uint32_t *entry = hits + h * 6;
+                        uint32_t *entry = hits + h * GPU_HIT_STRIDE;
                         int widx = entry[0], sidx = entry[1];
                         if ((unsigned)widx >= (unsigned)g->count || sidx < 0 || sidx >= grp_count[gi]) continue;
-                        for (int w = 0; w < 4; w++) curin.i[w] = entry[2 + w];
+                        /* Universal hit: [0]=widx [1]=sidx [2]=iter [3..]=hash */
+                        for (int w = 0; w < 4; w++) curin.i[w] = entry[3 + w];
                         int pack_idx = grp_start[gi] + sidx;
                         int snap_idx = pack_map[pack_idx];
                         char *s1 = saltsnap[snap_idx].salt;
@@ -716,7 +717,7 @@ void gpujob(void *arg) {
                     g->op, g->count, nsalts_packed, nhits);
             if (nhits > 0 && hits) {
                 for (int dbgi = 0; dbgi < nhits && dbgi < 8; dbgi++) {
-                    uint32_t *e = hits + dbgi * 7;
+                    uint32_t *e = hits + dbgi * GPU_HIT_STRIDE;
                     fprintf(stderr, "[GPU-DBG]   hit[%d]: widx=%u sidx=%u iter=%u hx=%08x hy=%08x hz=%08x hw=%08x\n",
                             dbgi, e[0], e[1], e[2], e[3], e[4], e[5], e[6]);
                 }
@@ -731,18 +732,15 @@ void gpujob(void *arg) {
             int is_phpbb3 = (g->op == JOB_PHPBB3);
             int is_descrypt = (g->op == JOB_DESCRYPT);
             int is_bcrypt = (g->op == JOB_BCRYPT);
-            int hash_words = is_bcrypt ? 6 : gpu_hash_words(g->op);
+            int hash_words = gpu_hash_words(g->op);
             int hexlen = hash_words * 8;
-            int has_iter = (Maxiter > 1 || op_cat == GPU_CAT_SALTPASS);
-            int hit_stride = (is_phpbb3 || is_descrypt) ? 6
-                : is_bcrypt ? 9
-                : has_iter ? (3 + hash_words) : (2 + hash_words);
+            /* Universal hit stride: all kernels emit 19 uint32 words per hit.
+             * [0]=word_idx [1]=salt_idx [2]=iter_num [3..18]=hash[0..15] */
+            /* GPU_HIT_STRIDE defined in gpujob.h */
             int overflow = (nhits > GPU_MAX_RETURN);
 
-            /* On overflow, retry ALL words on CPU — partial hits may be stored */
-
             for (int h = 0; h < stored; h++) {
-                uint32_t *entry = hits + h * hit_stride;
+                uint32_t *entry = hits + h * GPU_HIT_STRIDE;
                 int widx = entry[0];
                 int sidx = entry[1];
                 if ((unsigned)widx >= (unsigned)g->count) continue;
@@ -750,23 +748,10 @@ void gpujob(void *arg) {
                 if (op_cat != GPU_CAT_MASK && op_cat != GPU_CAT_UNSALTED &&
                     sidx >= nsalts_packed) continue;
 
-
-
-                int iter_num;
-                if (is_phpbb3 || is_descrypt) {
-                    /* phpbb3/descrypt: fixed stride 6, no iter field */
-                    iter_num = 1;
-                    for (int w = 0; w < 4; w++)
-                        curin.i[w] = entry[2 + w];
-                } else if (has_iter) {
-                    iter_num = entry[2];
-                    for (int w = 0; w < hash_words; w++)
-                        curin.i[w] = entry[3 + w];
-                } else {
-                    iter_num = 1;
-                    for (int w = 0; w < hash_words; w++)
-                        curin.i[w] = entry[2 + w];
-                }
+                /* Universal hit layout: [0]=widx [1]=sidx [2]=iter [3..]=hash */
+                int iter_num = entry[2];
+                for (int w = 0; w < hash_words; w++)
+                    curin.i[w] = entry[3 + w];
 
                 if (op_cat == GPU_CAT_MASK || op_cat == GPU_CAT_UNSALTED) {
                     /* Mask/unsalted: reconstruct candidate from base word + mask index */
@@ -779,8 +764,7 @@ void gpujob(void *arg) {
                     uint64_t midx = chunk_mask_start + (uint64_t)(midx32 - (uint32_t)chunk_mask_start);
                     char *base_word;
                     int blen;
-                    if (g->word_stride && widx < 4096 &&
-                        (gpu_mask_n_prepend > 0 || gpu_mask_n_append > 0)) {
+                    if (g->word_stride && widx < 4096) {
                         char *slot = g->raw + widx * g->word_stride;
                         int total_len = ((uint32_t *)slot)[14] >> 3;
                         blen = total_len - gpu_mask_n_prepend - gpu_mask_n_append;
@@ -1438,6 +1422,8 @@ int gpu_hash_words(int op) {
     case JOB_SHA224:
     case JOB_KECCAK224: case JOB_SHA3_224:
         return 7;
+    case JOB_BCRYPT:
+        return 6;
     case JOB_SHA1: case JOB_SHA1RAW: case JOB_SQL5:
     case JOB_SHA1PASSSALT: case JOB_SHA1SALTPASS: case JOB_SHA1DRU:
     case JOB_HMAC_SHA1: case JOB_HMAC_SHA1_KPASS:
