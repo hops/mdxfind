@@ -184,9 +184,12 @@ int Neon;
 #define mysha1 SHA1
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.321 2026/04/16 16:22:43 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.322 2026/04/16 18:37:28 dlr Exp dlr $";
 /*
  * $Log: mdxfind.c,v $
+ * Revision 1.322  2026/04/16 18:37:28  dlr
+ * Show "finishing" instead of "done" in ETA when work queue is non-empty
+ *
  * Revision 1.321  2026/04/16 16:22:43  dlr
  * Fix leftover debug fprintf argument list from PHPBB3 investigation
  *
@@ -35972,14 +35975,18 @@ MDXALIGN void ReportStats(void *dummy) {
           if (progress_frac > 0.001 && progress_frac < 1.0)
             remaining = wtime * (1.0 - progress_frac) / progress_frac;
           char eta[64];
-          format_eta(remaining, eta, sizeof(eta));
+          long wq = peek_lock(WorkWaiting);
+          if (remaining <= 0 && wq > 0)
+            snprintf(eta, sizeof(eta), "finishing");
+          else
+            format_eta(remaining, eta, sizeof(eta));
           char prefix = (AutoCountRequested && !AutoCountDone) ? '~' : ' ';
           double dprog = (double)(Lowline+LowSkip), dtotal = (double)total_est;
           char *pmult2 = "", *tmult2 = "";
           format_rate(dprog, &dprog, &pmult2);
           format_rate(dtotal, &dtotal, &tmult2);
           fprintf(stderr, "Working on %s, w=%ld, %.1f%s/%.1f%s (%.1f%%), Found=%llu, %.2f%sh/s, %.2f%sc/s, ETA%c%s\n",
-                  Curfile, peek_lock(WorkWaiting), dprog, pmult2, dtotal, tmult2,
+                  Curfile, wq, dprog, pmult2, dtotal, tmult2,
                   100.0*progress_frac, Totfound, hps, mult1, lps, mult, prefix, eta);
         } else {
           fprintf(stderr, "Working on %s, w=%ld, line %llu, Found=%llu, %.2f%sh/s, %.2f%sc/s\n",
