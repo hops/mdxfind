@@ -184,9 +184,12 @@ int Neon;
 #define mysha1 SHA1
 #endif
 
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.318 2026/04/16 14:15:14 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/mdxfind.c,v 1.319 2026/04/16 14:34:09 dlr Exp dlr $";
 /*
  * $Log: mdxfind.c,v $
+ * Revision 1.319  2026/04/16 14:34:09  dlr
+ * Auto-enable -W auto when MDXFIND_CACHE env var is set. Add -W none to disable ETA (overrides env var).
+ *
  * Revision 1.318  2026/04/16 14:15:14  dlr
  * Phase 3: SQLite line count cache (mdxfind.db). Cache keyed on (realpath, size, mtime). -W auto:/path overrides location. MDXFIND_CACHE env var. WAL mode for concurrent access. Prune /tmp/ entries after 7 days. Summary line shows cached vs counted. SQLite amalgamation (sqlite3.c/sqlite3.h) bundled.
  *
@@ -40872,7 +40875,10 @@ int main(int argc, char **argv) {
         break;
 
       case 'W':
-        if (strncmp(optarg, "auto", 4) == 0) {
+        if (strcmp(optarg, "none") == 0) {
+          AutoCountRequested = 0;
+          EstimatedTotalLines = 0;
+        } else if (strncmp(optarg, "auto", 4) == 0) {
           AutoCountRequested = 1;
           if (optarg[4] == ':' && optarg[5]) {
             strncpy(LineCountCachePath, optarg + 5, sizeof(LineCountCachePath) - 1);
@@ -40887,7 +40893,7 @@ int main(int argc, char **argv) {
           else if (*endp == 'M' || *endp == 'm') { wval *= 1000000; endp++; }
           else if (*endp == 'G' || *endp == 'g') { wval *= 1000000000ULL; endp++; }
           if (wval == 0) {
-            fprintf(stderr, "-W: invalid line count '%s' (use a number or 'auto')\n", optarg);
+            fprintf(stderr, "-W: invalid line count '%s' (use a number, 'auto', or 'none')\n", optarg);
             exit(1);
           }
           EstimatedTotalLines = wval;
@@ -42001,8 +42007,9 @@ usage:
     printf("-w\tNumber of lines to skip from first wordlist\n");
     printf("-W\tETA display: -W <count>[K|M|G] set estimated lines,\n");
     printf("\t-W auto count in background (cached in mdxfind.db),\n");
-    printf("\t-W auto:/path/to/cache.db override cache location\n");
-    printf("\tEnvironment: MDXFIND_CACHE=/path/to/mdxfind.db\n");
+    printf("\t-W auto:/path/to/db override cache location,\n");
+    printf("\t-W none disable ETA (overrides MDXFIND_CACHE)\n");
+    printf("\tMDXFIND_CACHE=/path/to/mdxfind.db enables -W auto automatically\n");
     printf("-y\tEnable directory recursion for wordlists\n");
     printf("-z\tEnable debugging information/hash results\n");
     printf("-Z\tEnable histogram of rule hits\n");
@@ -45214,6 +45221,12 @@ usage:
   win_pause_init();
 #endif
   launch(ReportStats, NULL);
+
+  /* Auto-enable -W auto if MDXFIND_CACHE is set and -W was not specified */
+  if (!AutoCountRequested && !EstimatedTotalLines && getenv("MDXFIND_CACHE")) {
+    AutoCountRequested = 1;
+    fprintf(stderr, "Wordlist ETA: automatic (MDXFIND_CACHE set)\n");
+  }
 
   /* Launch background line counter for -W auto */
   if (AutoCountRequested && argc > 0) {

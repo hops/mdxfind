@@ -133,7 +133,7 @@ mdxfind -f hashfile [options] [wordlist ...]
 | `-u FILE` | Read usernames from file |
 | `-j FILE` | Read peppers (prefixes) from file |
 | `-k FILE` | Read suffixes from file |
-| `-i N` | Iteration count — GPU-accelerated for MD5, SHA1, SHA256, MD4, SHA512. Composable with `-n`/`-N` masks |
+| `-i N` | Iteration count — GPU-accelerated for MD5, SHA1, SHA224, SHA256, SHA384, SHA512, MD4, RMD160, BLAKE2S256, Whirlpool, MD6-256, Keccak/SHA3, Streebog. Composable with `-n`/`-N` masks |
 
 **Password manipulation:**
 
@@ -168,6 +168,33 @@ mdxfind -f hashfile [options] [wordlist ...]
 | `-G none` | Disable GPU acceleration entirely |
 
 GPU is auto-detected: OpenCL on Linux/FreeBSD/Windows (NVIDIA, AMD), Metal on macOS (Apple Silicon, Intel).
+
+**ETA and progress:**
+
+| Option | Description |
+|--------|-------------|
+| `-W auto` | Background line count with SQLite cache (default if `MDXFIND_CACHE` is set) |
+| `-W auto:/path/db` | Background line count, override cache location |
+| `-W <count>` | Set estimated total lines manually (supports `K`, `M`, `G` suffixes) |
+| `-W none` | Disable ETA display (overrides `MDXFIND_CACHE` auto-enable) |
+
+When `-W` is active, the progress line shows completion percentage and estimated time remaining:
+
+```
+Working on words.txt, w=62, 3.3M/10.0M (33.0%), Found=12, 307.90Mh/s, 61.59Kc/s, ETA 2m05s
+```
+
+The SQLite cache (`mdxfind.db` in the current directory by default) stores line counts keyed on file path, size, and modification time. Subsequent runs skip decompression entirely for cached files. The cache handles gzip, xz, bzip2, zstd, and zip-compressed wordlists.
+
+Set `MDXFIND_CACHE` to enable automatic ETA for all runs without specifying `-W auto` each time:
+
+```bash
+export MDXFIND_CACHE=/home/user/mdxfind.db    # enables -W auto, stores cache here
+mdxfind -m e1 -f hashes.txt wordlist.txt       # ETA shown automatically
+
+MDXFIND_CACHE=/shared/mdxfind.db mdxfind ...   # multiple instances share the cache
+mdxfind -W none -m e1 -f hashes.txt words.txt  # disable for this run
+```
 
 **Output and control:**
 
